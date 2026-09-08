@@ -9,6 +9,7 @@ This file lives at the **project root** (outside `.claude/`) and tracks progress
 ## Project
 
 - **Name:** CRM — B2B Calls (web-based CRM for a B2B call center)
+- **Repo:** `git@github.com:SaadAbdullaH3/crm-b2b-calls.git` (public). Day 1 foundation is pushed — **Dev B clones this rather than rebuilding Day 1.** First-time setup: `cp .env.example .env && docker compose up -d && npm ci && npx prisma migrate dev && npm run db:seed && npm run dev`. Use `npm ci`, not `npm install`, so the lockfile pins hold (notably Prisma 6.19.3).
 - **Spec:** `docs/crm-b2b-build-plan.md` (feature correlation + 10-day plan) — original SRS was `CRM_B2B_Calls_Final_Requirements.docx`, v1.0
 - **Stack:** Next.js (App Router, custom server) + TypeScript + PostgreSQL + Prisma + Socket.io + Tailwind/shadcn
 - **Deployment target:** self-hosted VPS (not Vercel) — Nginx + PM2/Docker
@@ -22,7 +23,7 @@ This file lives at the **project root** (outside `.claude/`) and tracks progress
 
 | Day | Dev A (Saad) — Core Calling Pipeline | Status | Dev B (Teammate) — Ops & People Console | Status | Blockers / Notes |
 |---|---|---|---|---|---|
-| 1 | Shared: repo scaffold, Prisma schema, Postgres setup, Auth/RBAC middleware, base layouts, Socket.io skeleton, seed 8 users | **Done (Dev A)** — 25 tables migrated, auth + RBAC live, 4 role shells, 8 users seeded, Socket.io + cron running | (same, shared) | Not started | Dev B: pull, then `docker compose up -d && npm i && npx prisma migrate dev && npm run db:seed`. **Pin Prisma to 6.19.3** — npm now resolves 7.x, which is a different product. |
+| 1 | Shared: repo scaffold, Prisma schema, Postgres setup, Auth/RBAC middleware, base layouts, Socket.io skeleton, seed 8 users | **Done (Dev A)** — 25 tables migrated, auth + RBAC live, 4 role shells, 8 users seeded, Socket.io + cron running | Shared foundation reused, not rebuilt — Dev B clones the repo and runs the setup in the Project section above | In progress (Dev B setting up) | Day 1 shipped by Dev A and pushed 2026-09-09; Dev B skips rebuilding it so both tracks can start Day 2 in parallel. **Use `npm ci`** — a fresh `npm install prisma` resolves to 7.x, which is a different product. |
 | 2 | Lead Import Engine: upload, column mapping, parsing, duplicate detection, phone-format validation | Not started | Admin Configuration: user CRUD, roles/permissions, groups, dynamic field builder, dialer settings | Not started | |
 | 3 | Import: validation summary, error export, import history, lead source tagging. Start Lead Assignment: request UI | Not started | Communication Module: DMs, groups, broadcasts, announcements, notification schema + Socket.io wiring | Not started | |
 | 4 | Lead Assignment: approval screen, 5-min auto-assign cron, transactional locking, logout-return, manual assign/reassign | Not started | Monitoring Engine: screen time, idle detection, break/pause control, activity event capture | Not started | |

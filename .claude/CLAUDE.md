@@ -102,3 +102,10 @@ If step 2 ever produces a second open row for a lead, Postgres rejects the write
 - `package.json#prisma` is deprecated in favour of `prisma.config.ts`. Harmless on 6.x; left alone rather than risking the config file's different `.env` loading behaviour mid-setup.
 
 **Next session — Day 2:** Lead Import Engine part 1 (LM-01/02/04/05): Excel upload, dynamic column mapping, duplicate detection, U.S. phone **format** validation only. Check `GLOBAL.md` first — Dev B's Day 2 dynamic-field builder feeds `leads.custom_fields`; stub it if not ready.
+
+**End-of-day addendum (2026-09-09)**
+- Day 1 pushed to `git@github.com:SaadAbdullaH3/crm-b2b-calls.git` (public repo, Saad's call). Two commits: `379f59e` docs baseline, `dde93e2` Day 1 foundation. 72 files; `.env` correctly untracked, only `.env.example` published.
+- **Remote uses SSH, not HTTPS.** GitHub no longer accepts password auth over HTTPS and `gh` CLI isn't installed on this machine; the existing key at `~/.ssh/id_ed25519` already authenticates as SaadAbdullaH3. If a future session sees "Password authentication is not supported", the remote has been reset to HTTPS — switch it back with `git remote set-url origin git@github.com:SaadAbdullaH3/crm-b2b-calls.git`.
+- **Dev B is NOT rebuilding Day 1.** They clone this repo and run the setup block in GLOBAL.md's Project section. That means the schema, RBAC middleware and Socket.io event contract are now genuinely shared code — a breaking change to any of them is a coordination event, not a local edit. Same rule as before: their 9 framed tables are theirs; `audit_log` / `notifications` / `activity_events` need a heads-up first.
+- Local dev server stopped at end of session; the Postgres container is left running (`restart: unless-stopped`). `docker compose down` if the port is needed.
+- Not built, deliberately: an SRS requirements-traceability doc mapping the ~150 numbered requirements and the 27 acceptance criteria to build days. Nothing in the repo tracks that yet, and Day 10 is a full regression against exactly that list — worth creating before then. Raised with Saad on Day 1; deferred, not forgotten.
