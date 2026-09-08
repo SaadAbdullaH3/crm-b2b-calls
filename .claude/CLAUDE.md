@@ -57,3 +57,48 @@ Dev B owns: Admin Configuration, Management Console, Monitoring Engine, HR Modul
 - Day-by-day prompts written to `docs/dev-a-phase-prompts.md`.
 - Stack confirmed with Dev B: Next.js + Postgres + Prisma + Socket.io, self-hosted.
 - Day 1 not yet started — next session should open with the Day 1 prompt.
+
+### 2026-09-09 — Day 1: Shared foundation (scaffold, schema, auth, RBAC, layouts, seed)
+
+**Shipped**
+- Next.js **16.3.4** (App Router, TS, Tailwind v4, `src/`) + React 19.2.8, scaffolded into the existing docs folder.
+- Custom server `server.ts` (run via `tsx`, not `next start`) owning all three long-lived concerns: Next request handler, Socket.io, node-cron. Graceful SIGTERM/SIGINT shutdown.
+- Socket.io at path `/api/socket`, authenticated **on the handshake** via the same session cookie; sockets join `user:<id>` and `role:<name>` rooms. Verified: no cookie → rejected, bogus cookie → rejected, valid session → connected.
+- `node-cron`: 2 jobs registered and ticking (lead auto-assign sweep, idle sweep), both no-op bodies until Day 4. Guarded by `ENABLE_CRON` — must be true on exactly ONE process under PM2 cluster.
+- Postgres 16 via `docker-compose.yml` (`crm_b2b`, volume `pgdata`). **25 tables**, one migration applied.
+- Auth: server-side `sessions` table + httpOnly cookie; token is random 32 bytes, only its SHA-256 hash is stored. bcryptjs cost 12. Login is timing-equalised and returns one generic error so the form can't enumerate accounts.
+- `requireRole()` / `requirePermission()` / `requireAuth()` in `src/lib/auth/rbac.ts` — the single API-level RBAC boundary. Page-level guards in `src/lib/auth/guard.ts` are UX only.
+- Role-gated shells for `/agent`, `/management`, `/admin`, `/hr` + `/login` + `/403`. shadcn/ui installed (11 components).
+- Seed: 33 permissions, 4 roles, 6 system dispositions, **8 users** (5 Agent, 1 Management, 1 Admin, 1 HR). Idempotent. Dev password from `SEED_PASSWORD`.
+
+**Decisions made (all confirmed with Saad before building)**
+1. **Lock model** — denormalized ownership on `leads` (`status` / `assigned_to_id` / `locked_at` / `current_assignment_id`) for fast reads + append-only `lead_assignments` for history, and a **partial unique index** as the hard guarantee.
+2. **Postgres** — local Docker per dev; only migrations are shared.
+3. **Auth** — DB session table, not stateless JWT, so logout/expiry are real server-side events (LA-09 + Dev B's monitoring need this).
+4. **Dev B's tables** — framed thin with correct FKs, theirs to reshape. `audit_log` / `notifications` / `activity_events` built properly since Dev A writes to them.
+5. **Prisma pinned to 6.19.3.** `npm install prisma` now resolves to **7.x ("Prisma Next")**, which replaces the whole workflow (contracts, db signing, `prisma db update`) and has almost no community material yet. Not a risk worth taking on a 10-day deadline. **Do not let a future `npm update` drift this to 7.**
+
+**THE ASSIGNMENT TRANSACTION RECIPE — Day 4 must follow this exactly**
+Inside a single `prisma.$transaction`:
+1. `SELECT ... FROM leads WHERE status='AVAILABLE' AND do_not_call=false ... FOR UPDATE SKIP LOCKED LIMIT n`
+   — `SKIP LOCKED` is what lets two agents request simultaneously without blocking each other; they simply get different rows.
+2. `INSERT` one `lead_assignments` row per lead (`released_at` NULL).
+3. `UPDATE leads` setting `status`, `assigned_to_id`, `locked_at`, `current_assignment_id`.
+Releasing ownership is the mirror image: set `released_at` + `release_reason` on the open row, then null out the lead's ownership columns. **Never** update any other column on an existing `lead_assignments` row, and never delete one.
+If step 2 ever produces a second open row for a lead, Postgres rejects the write via `lead_assignments_one_active_holder` — that index is the backstop, not the primary mechanism.
+
+**Verified before close of day**
+- Partial unique index proven in psql: 1st assignment OK → 2nd open assignment for same lead **rejected** (`duplicate key ... lead_assignments_one_active_holder`) → release then reassign OK → history intact, exactly one open holder.
+- All 4 roles log in and land on their own section; each is 307'd to `/403` from the other three; unauthenticated → `/login?next=...`.
+- Logout writes `revoked_at`; `/api/auth/me` returns 401 afterwards.
+- Agent's resolved permission set contains **no `monitoring.*` keys** (TM-05 boundary holds at the data layer, not just the UI).
+- `npm run build` clean, `tsc --noEmit` clean.
+
+**Gotchas hit — worth knowing before Day 2**
+- **Next 16 renamed `middleware.ts` → `proxy.ts`**, and with a `src/` directory it must be at **`src/proxy.ts`**, not the repo root. At the root it is silently ignored — no error, it just never runs. Confirm it appears as `ƒ Proxy (Middleware)` in `npm run build` output.
+- `server-only` throws if imported by anything the custom server loads, since `server.ts` runs through tsx rather than Next's bundler. Session logic is therefore split: `session-core.ts` (no Next imports, safe for `socket.ts`) and `session.ts` (cookie-bound, `server-only`).
+- This shadcn build is on **Base UI**, not Radix — there is no `asChild`; use the `render` prop or apply `buttonVariants()` to the element directly.
+- `npm audit` reports a high-severity `deepmerge-ts` advisory reaching us through the **Prisma CLI** (devDependency only, not in the app runtime). The offered fix downgrades Prisma to 6.12. Left as-is deliberately; revisit on Day 9's NFR pass.
+- `package.json#prisma` is deprecated in favour of `prisma.config.ts`. Harmless on 6.x; left alone rather than risking the config file's different `.env` loading behaviour mid-setup.
+
+**Next session — Day 2:** Lead Import Engine part 1 (LM-01/02/04/05): Excel upload, dynamic column mapping, duplicate detection, U.S. phone **format** validation only. Check `GLOBAL.md` first — Dev B's Day 2 dynamic-field builder feeds `leads.custom_fields`; stub it if not ready.

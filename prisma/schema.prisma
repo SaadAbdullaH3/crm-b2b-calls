@@ -1,0 +1,668 @@
+// CRM — B2B Calls : core schema
+//
+// Conventions
+//   * Every model is @@map'd to a snake_case table name so raw SQL in the
+//     build plan and in migrations matches the docs.
+//   * Ownership rule (NF-07): a lead's CURRENT owner lives on `leads`
+//     (status / assigned_to_id / locked_at / current_assignment_id) for fast
+//     reads, while `lead_assignments` is an append-only history. The two are
+//     always written together inside one transaction.
+//   * `lead_assignments` additionally carries a PARTIAL UNIQUE INDEX added by
+//     hand in the migration SQL — see the model for details. Do not drop it.
+//
+// Ownership split: models under "DEV B TERRITORY" are framed out so nothing
+// is blocked on Day 2; Dev B owns their final shape (see GLOBAL.md).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================================================
+// ENUMS
+// ===========================================================================
+
+enum LeadStatus {
+  AVAILABLE
+  ASSIGNED
+  IN_PROGRESS
+  CALLBACK_SCHEDULED
+  CLOSED_QUALIFIED
+  CLOSED_NOT_INTERESTED
+  DO_NOT_CALL
+}
+
+/// The 6 outcomes required by the SRS. Stored as a stable code on `calls` and
+/// denormalized onto `leads.last_disposition_code` for the logout-return rule.
+enum DispositionCode {
+  NO_ANSWER
+  CALL_BACK_LATER
+  NOT_INTERESTED
+  DO_NOT_CALL
+  EMAIL
+  QUALIFIED
+}
+
+enum AssignmentMethod {
+  REQUEST_APPROVED
+  AUTO_ASSIGN
+  MANUAL
+  REASSIGN
+}
+
+enum ReleaseReason {
+  LOGOUT_RETURN
+  REASSIGNED
+  RELEASED_BY_MANAGEMENT
+  COMPLETED
+  ADMIN_OVERRIDE
+}
+
+enum LeadRequestStatus {
+  PENDING
+  APPROVED
+  MODIFIED
+  REJECTED
+  AUTO_ASSIGNED
+  EXPIRED
+  CANCELLED
+}
+
+enum RequestQuantitySource {
+  PRESET_15
+  PRESET_30
+  CUSTOM
+}
+
+enum ImportStatus {
+  UPLOADED
+  MAPPING
+  VALIDATING
+  PENDING_REVIEW
+  IMPORTING
+  COMPLETED
+  FAILED
+}
+
+enum CallbackStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  MISSED
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+// ===========================================================================
+// AUTH & RBAC
+// ===========================================================================
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  label       String
+  description String?
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users       User[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  module      String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  roles RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  fullName     String    @map("full_name")
+  employeeCode String?   @unique @map("employee_code")
+  phone        String?
+  roleId       String    @map("role_id")
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  role Role @relation(fields: [roleId], references: [id])
+
+  sessions              Session[]
+  leadsAssigned         Lead[]                       @relation("LeadAssignedTo")
+  leadsMarkedDnc        Lead[]                       @relation("LeadDncBy")
+  imports               LeadImport[]
+  assignmentsHeld       LeadAssignment[]             @relation("AssignmentHolder")
+  assignmentsMade       LeadAssignment[]             @relation("AssignmentActor")
+  leadRequests          LeadRequest[]                @relation("RequestAgent")
+  leadRequestsReviewed  LeadRequest[]                @relation("RequestReviewer")
+  calls                 Call[]
+  callbacks             Callback[]
+  notifications         Notification[]
+  activityEvents        ActivityEvent[]
+  auditEntries          AuditLog[]
+  messagesSent          Message[]                    @relation("MessageSender")
+  messagesReceived      MessageRecipient[]
+  announcementsMade     Announcement[]
+  acknowledgements      AnnouncementAcknowledgement[]
+  hrEmployee            HrEmployee?
+  leaveRequests         LeaveRequest[]               @relation("LeaveRequester")
+  leaveRequestsReviewed LeaveRequest[]               @relation("LeaveReviewer")
+  reportsGenerated      ReportGenerated[]
+  scoresReceived        ManagementScore[]            @relation("ScoreSubject")
+  scoresGiven           ManagementScore[]            @relation("ScoreAuthor")
+
+  @@index([roleId])
+  @@index([isActive])
+  @@map("users")
+}
+
+/// Server-side session record. Logout and expiry are real events here, which is
+/// what the LA-09 logout-return rule and Dev B's monitoring engine hang off.
+model Session {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  revokedAt  DateTime? @map("revoked_at")
+  ip         String?
+  userAgent  String?   @map("user_agent")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ===========================================================================
+// DEV A — CORE CALLING PIPELINE
+// ===========================================================================
+
+model LeadImport {
+  id               String       @id @default(cuid())
+  fileName         String       @map("file_name")
+  storedPath       String?      @map("stored_path")
+  uploadedById     String       @map("uploaded_by_id")
+  sourceLabel      String?      @map("source_label")
+  status           ImportStatus @default(UPLOADED)
+  /// Detected-column -> CRM-field map chosen by Management (LM-02).
+  columnMapping    Json?        @map("column_mapping")
+  totalRows        Int          @default(0) @map("total_rows")
+  validRows        Int          @default(0) @map("valid_rows")
+  duplicateRows    Int          @default(0) @map("duplicate_rows")
+  missingInfoRows  Int          @default(0) @map("missing_info_rows")
+  invalidPhoneRows Int          @default(0) @map("invalid_phone_rows")
+  importedRows     Int          @default(0) @map("imported_rows")
+  errorReportPath  String?      @map("error_report_path")
+  startedAt        DateTime?    @map("started_at")
+  completedAt      DateTime?    @map("completed_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  uploadedBy User   @relation(fields: [uploadedById], references: [id])
+  leads      Lead[]
+
+  @@index([uploadedById])
+  @@index([status])
+  @@index([createdAt])
+  @@map("lead_imports")
+}
+
+model Lead {
+  id String @id @default(cuid())
+
+  // --- mapped business fields ---------------------------------------------
+  companyName String? @map("company_name")
+  contactName String? @map("contact_name")
+  jobTitle    String? @map("job_title")
+  phoneRaw    String? @map("phone_raw")
+  /// Normalized at import. LM-05 is FORMAT validation only — we never check
+  /// that a number is live or reachable.
+  phoneE164   String? @map("phone_e164")
+  email       String?
+  website     String?
+  addressLine String? @map("address_line")
+  city        String?
+  state       String?
+  postalCode  String? @map("postal_code")
+  /// Values for Admin-defined dynamic fields (Dev B's field builder).
+  customFields Json?  @map("custom_fields")
+  sourceLabel String? @map("source_label")
+  importId    String? @map("import_id")
+
+  // --- ownership + lock block (VICIdial-style lead hopper) ------------------
+  status              LeadStatus @default(AVAILABLE)
+  assignedToId        String?    @map("assigned_to_id")
+  lockedAt            DateTime?  @map("locked_at")
+  /// Points at the open row in lead_assignments. Kept in step with
+  /// assigned_to_id inside the same transaction; the partial unique index on
+  /// lead_assignments is what makes a second open row impossible.
+  currentAssignmentId String?    @unique @map("current_assignment_id")
+
+  // --- follow-up state (drives the LA-09 logout-return rule) ---------------
+  lastDispositionCode DispositionCode? @map("last_disposition_code")
+  lastDispositionAt   DateTime?        @map("last_disposition_at")
+  nextCallbackAt      DateTime?        @map("next_callback_at")
+  callAttempts        Int              @default(0) @map("call_attempts")
+
+  // --- sticky protections (survive reassignment) ---------------------------
+  doNotCall     Boolean   @default(false) @map("do_not_call")
+  doNotCallAt   DateTime? @map("do_not_call_at")
+  doNotCallById String?   @map("do_not_call_by_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  import            LeadImport?     @relation(fields: [importId], references: [id])
+  assignedTo        User?           @relation("LeadAssignedTo", fields: [assignedToId], references: [id])
+  doNotCallBy       User?           @relation("LeadDncBy", fields: [doNotCallById], references: [id])
+  currentAssignment LeadAssignment? @relation("LeadCurrentAssignment", fields: [currentAssignmentId], references: [id])
+
+  assignments LeadAssignment[] @relation("LeadAssignmentHistory")
+  calls       Call[]
+  callbacks   Callback[]
+
+  @@index([status, assignedToId])
+  @@index([assignedToId])
+  // Duplicate-detection lookups (Day 2). Deliberately NOT unique: "keep both"
+  // is a valid duplicate resolution on Day 3.
+  @@index([phoneE164])
+  @@index([email])
+  @@index([companyName])
+  @@index([nextCallbackAt])
+  @@index([importId])
+  @@index([doNotCall])
+  @@map("leads")
+}
+
+/// APPEND-ONLY assignment history. Rows are never deleted, and no column is
+/// ever updated except released_at / release_reason when ownership ends.
+///
+/// released_at IS NULL  ==>  this row is the lead's current holder.
+///
+/// The migration adds, by hand:
+///   CREATE UNIQUE INDEX lead_assignments_one_active_holder
+///     ON lead_assignments (lead_id) WHERE released_at IS NULL;
+/// That partial index is the database-level guarantee against double
+/// assignment (NF-07). Prisma cannot express it, so it lives in raw SQL and
+/// must be preserved through every future migration.
+model LeadAssignment {
+  id            String           @id @default(cuid())
+  leadId        String           @map("lead_id")
+  assignedToId  String           @map("assigned_to_id")
+  /// Null when the system assigned it (5-minute auto-assign job).
+  assignedById  String?          @map("assigned_by_id")
+  method        AssignmentMethod
+  requestId     String?          @map("request_id")
+  assignedAt    DateTime         @default(now()) @map("assigned_at")
+  releasedAt    DateTime?        @map("released_at")
+  releaseReason ReleaseReason?   @map("release_reason")
+  notes         String?
+
+  lead       Lead         @relation("LeadAssignmentHistory", fields: [leadId], references: [id], onDelete: Cascade)
+  assignedTo User         @relation("AssignmentHolder", fields: [assignedToId], references: [id])
+  assignedBy User?        @relation("AssignmentActor", fields: [assignedById], references: [id])
+  request    LeadRequest? @relation(fields: [requestId], references: [id])
+
+  currentForLead Lead?  @relation("LeadCurrentAssignment")
+  calls          Call[]
+
+  @@index([leadId, releasedAt])
+  @@index([assignedToId, releasedAt])
+  @@index([requestId])
+  @@index([assignedAt])
+  @@map("lead_assignments")
+}
+
+/// An agent's request for more leads (LA-02/LA-03). Management approves,
+/// rejects or modifies it; if untouched for 5 minutes the cron job assigns
+/// automatically — `auto_assign_at` is that job's only query predicate.
+model LeadRequest {
+  id                String                @id @default(cuid())
+  agentId           String                @map("agent_id")
+  quantityRequested Int                   @map("quantity_requested")
+  quantitySource    RequestQuantitySource @map("quantity_source")
+  status            LeadRequestStatus     @default(PENDING)
+  quantityApproved  Int?                  @map("quantity_approved")
+  quantityAssigned  Int                   @default(0) @map("quantity_assigned")
+  reviewedById      String?               @map("reviewed_by_id")
+  reviewedAt        DateTime?             @map("reviewed_at")
+  reviewNote        String?               @map("review_note")
+  /// created_at + 5 minutes. The auto-assign sweep selects on this.
+  autoAssignAt      DateTime              @map("auto_assign_at")
+  resolvedAt        DateTime?             @map("resolved_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+
+  agent       User             @relation("RequestAgent", fields: [agentId], references: [id])
+  reviewedBy  User?            @relation("RequestReviewer", fields: [reviewedById], references: [id])
+  assignments LeadAssignment[]
+
+  @@index([status, autoAssignAt])
+  @@index([agentId, status])
+  @@index([createdAt])
+  @@map("lead_requests")
+}
+
+/// Configuration/lookup table for call outcomes. The 6 SRS outcomes are seeded
+/// with is_system = true so Admin cannot delete them (they can be relabelled).
+model Disposition {
+  id               String          @id @default(cuid())
+  code             DispositionCode @unique
+  label            String
+  description      String?
+  /// Marks the outcome as an active follow-up: leads holding one of these stay
+  /// with the agent through logout instead of returning to the pool (LA-10).
+  isFollowUp       Boolean         @default(false) @map("is_follow_up")
+  /// Forces a callback date/time to be captured (Call Back Later).
+  requiresCallback Boolean         @default(false) @map("requires_callback")
+  /// Sets leads.do_not_call and blocks normal calling/reassignment.
+  blocksCalling    Boolean         @default(false) @map("blocks_calling")
+  isSystem         Boolean         @default(false) @map("is_system")
+  isActive         Boolean         @default(true) @map("is_active")
+  sortOrder        Int             @default(0) @map("sort_order")
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+
+  calls Call[]
+
+  @@map("dispositions")
+}
+
+/// One call attempt. Populated from Day 5; the VC Dialer fields exist now so
+/// wiring the real dialer on Day 9 needs no migration (CL-04).
+model Call {
+  id            String    @id @default(cuid())
+  leadId        String    @map("lead_id")
+  agentId       String    @map("agent_id")
+  assignmentId  String?   @map("assignment_id")
+  dispositionId String?   @map("disposition_id")
+  notes         String?
+  startedAt     DateTime? @map("started_at")
+  endedAt       DateTime? @map("ended_at")
+  durationSec   Int?      @map("duration_sec")
+  phoneDialed   String?   @map("phone_dialed")
+  /// How the call was placed: DIALER or CLIPBOARD fallback (CL-03).
+  channel       String    @default("CLIPBOARD")
+  recordingRef  String?   @map("recording_ref")
+  dialerCallId  String?   @map("dialer_call_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  lead        Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agent       User            @relation(fields: [agentId], references: [id])
+  assignment  LeadAssignment? @relation(fields: [assignmentId], references: [id])
+  disposition Disposition?    @relation(fields: [dispositionId], references: [id])
+  callbacks   Callback[]
+
+  @@index([leadId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([dispositionId])
+  @@map("calls")
+}
+
+model Callback {
+  id           String         @id @default(cuid())
+  leadId       String         @map("lead_id")
+  agentId      String         @map("agent_id")
+  callId       String?        @map("call_id")
+  scheduledFor DateTime       @map("scheduled_for")
+  status       CallbackStatus @default(SCHEDULED)
+  notes        String?
+  completedAt  DateTime?      @map("completed_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  lead  Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agent User  @relation(fields: [agentId], references: [id])
+  call  Call? @relation(fields: [callId], references: [id])
+
+  @@index([agentId, status, scheduledFor])
+  @@index([leadId])
+  @@index([scheduledFor])
+  @@map("callbacks")
+}
+
+// ===========================================================================
+// SHARED PLUMBING — Dev A writes to these from Day 3 / Day 8
+// ===========================================================================
+
+/// Append-only. Never updated, never deleted (AU-01..AU-03).
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  /// Value before the change, for the fields that changed.
+  before     Json?
+  /// Value after the change, for the same fields.
+  after      Json?
+  summary    String?
+  ip         String?
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  type      String
+  title     String
+  body      String?
+  payload   Json?
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model ActivityEvent {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  type       String
+  payload    Json?
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, occurredAt])
+  @@index([type])
+  @@map("activity_events")
+}
+
+// ===========================================================================
+// DEV B TERRITORY — framed out so nothing is blocked on Day 2.
+// Dev B owns the final shape of everything below (see GLOBAL.md).
+// ===========================================================================
+
+model Message {
+  id        String   @id @default(cuid())
+  senderId  String   @map("sender_id")
+  threadKey String?  @map("thread_key")
+  body      String
+  sentAt    DateTime @default(now()) @map("sent_at")
+
+  sender     User               @relation("MessageSender", fields: [senderId], references: [id])
+  recipients MessageRecipient[]
+
+  @@index([senderId, sentAt])
+  @@index([threadKey])
+  @@map("messages")
+}
+
+model MessageRecipient {
+  messageId   String    @map("message_id")
+  recipientId String    @map("recipient_id")
+  readAt      DateTime? @map("read_at")
+
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  recipient User    @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, recipientId])
+  @@index([recipientId, readAt])
+  @@map("message_recipients")
+}
+
+model Announcement {
+  id                      String   @id @default(cuid())
+  authorId                String   @map("author_id")
+  title                   String
+  body                    String
+  requiresAcknowledgement Boolean  @default(false) @map("requires_acknowledgement")
+  publishedAt             DateTime @default(now()) @map("published_at")
+
+  author           User                         @relation(fields: [authorId], references: [id])
+  acknowledgements AnnouncementAcknowledgement[]
+
+  @@index([publishedAt])
+  @@map("announcements")
+}
+
+model AnnouncementAcknowledgement {
+  announcementId String   @map("announcement_id")
+  userId         String   @map("user_id")
+  acknowledgedAt DateTime @default(now()) @map("acknowledged_at")
+
+  announcement Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([announcementId, userId])
+  @@map("announcement_acknowledgements")
+}
+
+model HrEmployee {
+  id          String    @id @default(cuid())
+  userId      String    @unique @map("user_id")
+  department  String?
+  designation String?
+  joinedAt    DateTime? @map("joined_at")
+  managerName String?   @map("manager_name")
+  notes       String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documents HrDocument[]
+
+  @@map("hr_employees")
+}
+
+model HrDocument {
+  id         String    @id @default(cuid())
+  employeeId String    @map("employee_id")
+  docType    String    @map("doc_type")
+  fileName   String    @map("file_name")
+  storedPath String    @map("stored_path")
+  expiresAt  DateTime? @map("expires_at")
+  notes      String?
+  uploadedAt DateTime  @default(now()) @map("uploaded_at")
+
+  employee HrEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, docType])
+  @@index([expiresAt])
+  @@map("hr_documents")
+}
+
+model LeaveRequest {
+  id           String      @id @default(cuid())
+  requesterId  String      @map("requester_id")
+  leaveType    String      @map("leave_type")
+  startDate    DateTime    @map("start_date")
+  endDate      DateTime    @map("end_date")
+  reason       String?
+  status       LeaveStatus @default(PENDING)
+  reviewedById String?     @map("reviewed_by_id")
+  reviewedAt   DateTime?   @map("reviewed_at")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  requester  User  @relation("LeaveRequester", fields: [requesterId], references: [id])
+  reviewedBy User? @relation("LeaveReviewer", fields: [reviewedById], references: [id])
+
+  @@index([requesterId, status])
+  @@index([status, startDate])
+  @@map("leave_requests")
+}
+
+model ReportGenerated {
+  id            String   @id @default(cuid())
+  generatedById String   @map("generated_by_id")
+  reportType    String   @map("report_type")
+  periodStart   DateTime @map("period_start")
+  periodEnd     DateTime @map("period_end")
+  filters       Json?
+  storedPath    String?  @map("stored_path")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  generatedBy User @relation(fields: [generatedById], references: [id])
+
+  @@index([reportType, createdAt])
+  @@map("reports_generated")
+}
+
+model ManagementScore {
+  id          String   @id @default(cuid())
+  subjectId   String   @map("subject_id")
+  authorId    String   @map("author_id")
+  periodStart DateTime @map("period_start")
+  periodEnd   DateTime @map("period_end")
+  score       Int
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  subject User @relation("ScoreSubject", fields: [subjectId], references: [id])
+  author  User @relation("ScoreAuthor", fields: [authorId], references: [id])
+
+  @@index([subjectId, periodStart])
+  @@map("management_scores")
+}

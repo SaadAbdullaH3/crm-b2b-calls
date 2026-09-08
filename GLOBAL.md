@@ -22,7 +22,7 @@ This file lives at the **project root** (outside `.claude/`) and tracks progress
 
 | Day | Dev A (Saad) — Core Calling Pipeline | Status | Dev B (Teammate) — Ops & People Console | Status | Blockers / Notes |
 |---|---|---|---|---|---|
-| 1 | Shared: repo scaffold, Prisma schema, Postgres setup, Auth/RBAC middleware, base layouts, Socket.io skeleton, seed 8 users | Not started | (same, shared) | Not started | |
+| 1 | Shared: repo scaffold, Prisma schema, Postgres setup, Auth/RBAC middleware, base layouts, Socket.io skeleton, seed 8 users | **Done (Dev A)** — 25 tables migrated, auth + RBAC live, 4 role shells, 8 users seeded, Socket.io + cron running | (same, shared) | Not started | Dev B: pull, then `docker compose up -d && npm i && npx prisma migrate dev && npm run db:seed`. **Pin Prisma to 6.19.3** — npm now resolves 7.x, which is a different product. |
 | 2 | Lead Import Engine: upload, column mapping, parsing, duplicate detection, phone-format validation | Not started | Admin Configuration: user CRUD, roles/permissions, groups, dynamic field builder, dialer settings | Not started | |
 | 3 | Import: validation summary, error export, import history, lead source tagging. Start Lead Assignment: request UI | Not started | Communication Module: DMs, groups, broadcasts, announcements, notification schema + Socket.io wiring | Not started | |
 | 4 | Lead Assignment: approval screen, 5-min auto-assign cron, transactional locking, logout-return, manual assign/reassign | Not started | Monitoring Engine: screen time, idle detection, break/pause control, activity event capture | Not started | |
@@ -41,6 +41,14 @@ This file lives at the **project root** (outside `.claude/`) and tracks progress
 
 - 2026-09-08 — Stack finalized: Next.js + Postgres + Prisma + Socket.io, self-hosted VPS. (both devs agreed)
 - 2026-09-08 — Split confirmed: Saad = Dev A (Core Calling Pipeline), teammate = Dev B (Ops & People Console).
+- 2026-09-09 — **Lead locking model finalized (Dev A).** Current owner lives on `leads` (`status` / `assigned_to_id` / `locked_at` / `current_assignment_id`); `lead_assignments` is append-only history where `released_at IS NULL` marks the current holder. A hand-written **partial unique index** `lead_assignments_one_active_holder` makes a second open assignment impossible at the database level. It lives in the migration SQL because Prisma cannot express it — **do not drop it, and re-add it if a future migration ever recreates that table.**
+- 2026-09-09 — **Auth = server-side `sessions` table + httpOnly cookie** (not stateless JWT). Logout and expiry are therefore real server-side events, which both LA-09 (return uncalled leads on logout) and the Monitoring Engine (screen time) depend on. Only the SHA-256 hash of the session token is stored.
+- 2026-09-09 — **RBAC contract:** `requireRole()` / `requirePermission()` / `requireAuth()` in `src/lib/auth/rbac.ts`, applied at the API-route level. Permission keys and the default role matrix live in `src/lib/auth/permissions.ts` (33 keys). Prefer permission keys over role names so Admin can re-map at runtime. Page guards in `src/lib/auth/guard.ts` are UX only, never the boundary.
+- 2026-09-09 — **Socket.io event contract lives in `src/lib/realtime/events.ts`** — both devs import from it, no string literals in routes. Path `/api/socket`, authenticated on the handshake, rooms `user:<id>` and `role:<name>`. Dev B: the `REQUEST_SUBMITTED` payload is already defined there for your Day 3 notification wiring — change it in that file, not locally.
+- 2026-09-09 — **Prisma pinned to 6.19.3.** `npm install prisma` now resolves to 7.x ("Prisma Next"), a redesigned product with a different migration workflow (contracts, db signing). Both devs stay on 6.19.3 for this sprint.
+- 2026-09-09 — **Next.js 16 note:** `middleware.ts` is renamed `proxy.ts`, and with a `src/` directory it must sit at `src/proxy.ts`. At the repo root it is silently ignored — no error, it just never runs.
+- 2026-09-09 — **Dev B owns the final shape of these 9 framed tables** (drafted thin by Dev A on Day 1 only so the schema compiles): `messages`, `message_recipients`, `announcements`, `announcement_acknowledgements`, `hr_employees`, `hr_documents`, `leave_requests`, `reports_generated`, `management_scores`. Reshape freely. **Please coordinate before changing** `audit_log`, `notifications` or `activity_events` — Dev A writes to those from Day 3 / Day 8.
+- 2026-09-09 — **Tables added beyond the original Day 1 list:** `sessions` (required by the auth model), `lead_requests` (LA-02/03 needs somewhere to record a request; your Day 6 approval queue reads it), `calls` (per-call capture — `dispositions` is the config lookup table, not the event), `role_permissions` (join table).
 
 ---
 
