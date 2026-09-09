@@ -63,8 +63,10 @@ export const PERMISSIONS: PermissionDef[] = [
   // --- Admin (Dev B, Day 2) ------------------------------------------------
   { key: "admin.users.manage", module: "admin", description: "Create, edit and deactivate users" },
   { key: "admin.roles.manage", module: "admin", description: "Manage roles and the permission matrix" },
+  { key: "admin.groups.manage", module: "admin", description: "Create and manage user groups (AD-03)" },
   { key: "admin.fields.manage", module: "admin", description: "Manage dynamic lead fields" },
   { key: "admin.dialer.configure", module: "admin", description: "Configure VC Dialer settings" },
+  { key: "admin.settings.manage", module: "admin", description: "Configure shifts, breaks and system settings (AD-07/08/09)" },
   { key: "admin.audit.read", module: "admin", description: "Search the audit log (AU-04)" },
 ];
 

@@ -10,9 +10,10 @@
  *   npm run db:seed
  */
 
-import { PrismaClient, DispositionCode } from "@prisma/client";
+import { PrismaClient, DispositionCode, Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { PERMISSIONS, ROLES } from "../src/lib/auth/permissions";
+import { SETTINGS, SETTING_KEYS, isSecretSetting } from "../src/lib/settings-catalogue";
 
 const prisma = new PrismaClient();
 
@@ -88,6 +89,14 @@ const USERS = [
   { email: "hr@crm.local", fullName: "HR User", role: "hr", employeeCode: "HR-001" },
 ];
 
+/** AD-03 / CM-05. The SRS names these four explicitly as examples. */
+const GROUPS = [
+  { name: "B2B Team", description: "All agents working the B2B calling campaign." },
+  { name: "Senior Agents", description: "Experienced agents; larger lead batches." },
+  { name: "New Agents", description: "Agents in onboarding." },
+  { name: "Training Team", description: "Staff running training and quality review." },
+];
+
 async function main() {
   console.log("Seeding...");
 
@@ -116,6 +125,12 @@ async function main() {
 
     // Re-assert the baseline matrix: drop mappings that are no longer in the
     // catalogue, then add the current set.
+    //
+    // !! Since Day 2 this is destructive. AD-02 lets an Admin re-map
+    // permissions at runtime, and `role_permissions` is authoritative once
+    // they have. Re-running the seed RESETS those changes back to the baseline
+    // in permissions.ts. Fine in development; on a live database, re-seed only
+    // when you intend to discard the Admin's customisation.
     await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });
     await prisma.rolePermission.createMany({
       data: permissions.map((p) => ({ roleId: role.id, permissionId: p.id })),
@@ -153,6 +168,42 @@ async function main() {
     });
   }
   console.log(`  users: ${USERS.length} (password: ${SEED_PASSWORD})`);
+
+  // --- system settings (Dev B, Day 2 — AD-06/07/08/09) ---------------------
+  // CREATE-ONLY, unlike the blocks above. These are operational values an
+  // Admin tunes at runtime (the TM-03 idle threshold especially); overwriting
+  // them on every re-seed would silently revert their configuration.
+  let settingsCreated = 0;
+  for (const key of SETTING_KEYS) {
+    const def = SETTINGS[key];
+    const existing = await prisma.systemSetting.findUnique({ where: { key } });
+    if (existing) continue;
+
+    await prisma.systemSetting.create({
+      data: {
+        key,
+        category: def.category,
+        // The catalogue defaults are typed interfaces; Prisma's Json input
+        // wants an index signature, so widen here rather than polluting the
+        // interfaces with `[k: string]: unknown`.
+        value: def.default as unknown as Prisma.InputJsonValue,
+        isSecret: isSecretSetting(key),
+        description: def.description,
+      },
+    });
+    settingsCreated++;
+  }
+  console.log(`  settings: ${settingsCreated} created, ${SETTING_KEYS.length - settingsCreated} already present`);
+
+  // --- groups (AD-03; the CM-05 examples from the SRS) ---------------------
+  for (const g of GROUPS) {
+    await prisma.group.upsert({
+      where: { name: g.name },
+      update: { description: g.description, isSystem: true },
+      create: { ...g, isSystem: true },
+    });
+  }
+  console.log(`  groups: ${GROUPS.length}`);
 
   console.log("Seed complete.");
 }

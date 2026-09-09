@@ -102,6 +102,22 @@ enum LeaveStatus {
   CANCELLED
 }
 
+/// Input type of an Admin-defined dynamic lead field (AD-05). Drives both the
+/// form control rendered in the UI and the coercion applied when Dev A's
+/// importer maps a spreadsheet column onto the field.
+enum LeadFieldType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  DATE
+  BOOLEAN
+  SELECT
+  MULTISELECT
+  EMAIL
+  PHONE
+  URL
+}
+
 // ===========================================================================
 // AUTH & RBAC
 // ===========================================================================
@@ -183,6 +199,13 @@ model User {
   reportsGenerated      ReportGenerated[]
   scoresReceived        ManagementScore[]            @relation("ScoreSubject")
   scoresGiven           ManagementScore[]            @relation("ScoreAuthor")
+
+  // --- Dev B, Day 2: Admin Configuration ---------------------------------
+  groupMemberships GroupMember[]         @relation("GroupMembership")
+  groupsCreated    Group[]               @relation("GroupCreator")
+  groupMembersAdded GroupMember[]        @relation("GroupMemberAdder")
+  settingsUpdated  SystemSetting[]       @relation("SettingUpdater")
+  leadFieldsCreated LeadFieldDefinition[] @relation("FieldCreator")
 
   @@index([roleId])
   @@index([isActive])
@@ -522,6 +545,106 @@ model ActivityEvent {
 // DEV B TERRITORY — framed out so nothing is blocked on Day 2.
 // Dev B owns the final shape of everything below (see GLOBAL.md).
 // ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Admin Configuration (Dev B, Day 2) — AD-03, AD-05, AD-06/07/08/09
+// ---------------------------------------------------------------------------
+
+/// A named set of users (AD-03). Also the addressing unit for group messages
+/// and broadcasts on Day 3 (CM-05) — "B2B Team", "Senior Agents", "Training".
+model Group {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  /// Seeded groups an Admin may rename but not delete.
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  createdBy User?         @relation("GroupCreator", fields: [createdById], references: [id])
+  members   GroupMember[]
+
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId   String   @map("group_id")
+  userId    String   @map("user_id")
+  addedById String?  @map("added_by_id")
+  addedAt   DateTime @default(now()) @map("added_at")
+
+  group   Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user    User  @relation("GroupMembership", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User? @relation("GroupMemberAdder", fields: [addedById], references: [id])
+
+  @@id([groupId, userId])
+  @@index([userId])
+  @@map("group_members")
+}
+
+/// Key/value configuration store backing AD-06 (dialer), AD-07 (inactivity
+/// threshold, shifts, break rules), AD-08 (notification categories) and AD-09
+/// (report settings).
+///
+/// Deliberately key/value + Json rather than a column per setting: adding a new
+/// setting must never require a migration, and the Monitoring Engine reads its
+/// 5-minute threshold from here rather than hard-coding it (TM-03).
+///
+/// `isSecret` marks values that must never be returned through an API — dialer
+/// credentials are write-only from the UI's point of view (AD-06).
+model SystemSetting {
+  key         String   @id
+  category    String
+  value       Json
+  isSecret    Boolean  @default(false) @map("is_secret")
+  description String?
+  updatedById String?  @map("updated_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  updatedBy User? @relation("SettingUpdater", fields: [updatedById], references: [id])
+
+  @@index([category])
+  @@map("system_settings")
+}
+
+/// Admin-defined dynamic lead field (AD-05). The definition lives here; the
+/// per-lead VALUE lives in `leads.custom_fields` keyed by `key`, so adding a
+/// field never migrates the leads table.
+///
+/// Dev A's import column-mapper reads the active rows here to offer targets
+/// beyond the fixed business columns on `leads`.
+model LeadFieldDefinition {
+  id    String        @id @default(cuid())
+  /// The property name used inside `leads.custom_fields`. Immutable once rows
+  /// reference it — renaming would orphan every stored value.
+  key   String        @unique
+  label String
+  type  LeadFieldType @default(TEXT)
+
+  isRequired Boolean @default(false) @map("is_required")
+  /// Soft delete: definitions are deactivated, never dropped, so historical
+  /// leads keep rendering values for retired fields.
+  isActive   Boolean @default(true) @map("is_active")
+  /// Choice list for SELECT / MULTISELECT — a JSON array of strings.
+  options    Json?
+  helpText   String? @map("help_text")
+  sortOrder  Int     @default(0) @map("sort_order")
+
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  createdBy User? @relation("FieldCreator", fields: [createdById], references: [id])
+
+  @@index([isActive, sortOrder])
+  @@map("lead_field_definitions")
+}
+
+// ---------------------------------------------------------------------------
+// Communication (Dev B, Day 3)
+// ---------------------------------------------------------------------------
 
 model Message {
   id        String   @id @default(cuid())

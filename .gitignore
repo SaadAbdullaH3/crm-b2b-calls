@@ -36,3 +36,9 @@ coverage/
 
 # typescript
 *.tsbuildinfo
+
+# Dev B local context import (see DEV-B.md, which IS committed)
+CLAUDE.local.md
+
+# Dev B: machine-local Postgres port override (native PG18 owns 5432 here)
+docker-compose.override.yml
