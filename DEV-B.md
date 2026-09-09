@@ -165,3 +165,74 @@ phase prompts for his track only. Created as part of this session.
 
 **Next:** Day 2 — Admin Configuration: user CRUD, roles/permissions matrix, groups, dynamic lead
 field builder, dialer settings.
+
+### 2026-09-09 — Day 2: Admin Configuration (AD-01 through AD-07)
+
+**Schema — 4 new tables, 29 total (was 25)**
+Migration `20260909031108_day2_admin_config_groups_settings_fields`:
+- `groups` + `group_members` — AD-03, and the addressing unit for Day 3's CM-05 broadcasts.
+- `system_settings` — key/value + Json, so a new setting never needs a migration.
+- `lead_field_definitions` + `LeadFieldType` enum — AD-05; values go in `leads.custom_fields`.
+
+**Verified the NF-07 partial unique index survived the migration.** Dev A flagged that
+`lead_assignments_one_active_holder` is hand-written SQL Prisma doesn't know about, so a migration
+recreating that table would silently drop the double-assignment guarantee. Confirmed still present
+via `pg_indexes`. **Re-check this after every migration.**
+
+**Shipped**
+- 11 API routes under `/api/admin/*`, every one wrapped in `requirePermission()` with an `admin.*`
+  key — never `requireRole()`, so the matrix stays re-mappable at runtime.
+- 6 screens: Users, Roles & Permissions, Groups, Lead Fields, Dialer Settings, Time & Breaks, plus
+  a live Overview. Nav gained `/admin/groups` and `/admin/settings`.
+- `src/lib/settings-catalogue.ts` (pure data) + `src/lib/settings.ts` (Prisma-backed accessors),
+  split for the same reason as `session-core.ts` / `session.ts`.
+- `src/lib/api.ts` — shared `ok/badRequest/notFound/conflict/parseBody`, zod on every mutating route.
+- 2 new permission keys: `admin.groups.manage`, `admin.settings.manage` (35 total, was 33).
+- Seed extended: 4 system groups (the SRS's CM-05 examples) + 4 default settings.
+
+**Decisions**
+1. **`system_settings` is key/value + Json, not a column per setting.** AD-08/AD-09 are still
+   unbuilt; this way they need a registry entry, not a migration.
+2. **Secrets are write-only.** `dialer.credentials` is stored but GET returns `value: null` and only
+   `isConfigured: true`. An Admin screen has no reason to read an API secret back, and returning it
+   would put the credential in every browser cache and proxy log touching that endpoint. Verified:
+   the value is in Postgres, absent from the response.
+3. **`lead_field_definitions.key` and `.type` are immutable after creation.** Renaming a key orphans
+   every value already in `leads.custom_fields`, silently. Retire and recreate instead — DELETE is a
+   soft delete (`isActive=false`) so historical leads still render.
+4. **Settings seeding is create-only** while permissions/roles are still overwrite. Settings are
+   runtime operational values (the TM-03 threshold above all); re-seeding must not revert them.
+5. **Native `<select>` over the shadcn Select** in these forms. This build is on Base UI, whose
+   Select API differs from Radix; a native element is predictable and keyboard-accessible for free.
+
+**TM-05 — enforced in two places, verified in both**
+- UI: `monitoring.*` checkboxes are disabled on the agent row with a visible reason.
+- API: `PUT /api/admin/roles/[id]/permissions` rejects any `monitoring.*` key for the agent role
+  with a 409, independent of what the UI sends. Confirmed by direct curl bypassing the UI.
+
+**Lockout guards (all verified by curl)**
+- Admin role cannot lose `admin.roles.manage` → 409. Without this the matrix is unreachable forever.
+- An Admin cannot deactivate themselves, via PATCH or DELETE → 409.
+- The last active Admin cannot be demoted or deactivated → 409.
+- **Deactivating a user revokes their live sessions in the same transaction.** Verified: a
+  signed-in user's `/api/auth/me` goes 200 → 401 the moment they are deactivated. Without this the
+  flag only bites at next login and an already-signed-in user keeps full access.
+
+**⚠️ Found — told Dev A in GLOBAL.md.** `prisma/seed.ts` does `rolePermission.deleteMany()` then
+rebuilds from the `permissions.ts` baseline. That was harmless on Day 1, but now that AD-02 lets an
+Admin re-map permissions at runtime, **re-running the seed silently discards their configuration**.
+Comment added at the call site; a real fix (create-only, or a `--reset-permissions` flag) belongs in
+Day 9's NFR pass.
+
+**Verified before close of day**
+- `tsc --noEmit` clean; `next build` clean, 27 routes, `ƒ Proxy (Middleware)` present.
+- Agent → admin API = 403. Management → admin API = 403. No `passwordHash` in any response.
+- Validation rejects: 0-minute inactivity, heartbeat longer than the idle window, unknown setting
+  keys, malformed shift times, reserved field keys (`email`), bad key format, SELECT with no
+  options, duplicate field keys, deleting a system group.
+- All 6 screens render against live data.
+- Test artifacts cleaned from the dev DB: 8 users, 4 groups (3 members), 3 settings, 0 fields.
+
+**Next — Day 3:** Communication Module (CM-01…CM-08) + the notification pipeline Dev A consumes.
+Groups exist now, so group messaging has its target. The emit helper must not import `server-only`
+— the socket layer runs under tsx, not Next's bundler.
