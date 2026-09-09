@@ -102,6 +102,21 @@ enum LeaveStatus {
   CANCELLED
 }
 
+enum ConversationType {
+  DIRECT
+  GROUP
+  BROADCAST
+}
+
+/// Who an announcement reaches (CM-06). ROLE and GROUP are resolved to
+/// concrete users at publish time so later membership changes don't silently
+/// alter who was required to acknowledge.
+enum AnnouncementAudience {
+  ALL
+  ROLE
+  GROUP
+}
+
 /// Input type of an Admin-defined dynamic lead field (AD-05). Drives both the
 /// form control rendered in the UI and the coercion applied when Dev A's
 /// importer maps a spreadsheet column onto the field.
@@ -190,8 +205,10 @@ model User {
   activityEvents        ActivityEvent[]
   auditEntries          AuditLog[]
   messagesSent          Message[]                    @relation("MessageSender")
-  messagesReceived      MessageRecipient[]
+  conversations         ConversationParticipant[]    @relation("ConversationMember")
+  conversationsCreated  Conversation[]               @relation("ConversationCreator")
   announcementsMade     Announcement[]
+  announcementsReceived AnnouncementRecipient[]      @relation("AnnouncementRecipient")
   acknowledgements      AnnouncementAcknowledgement[]
   hrEmployee            HrEmployee?
   leaveRequests         LeaveRequest[]               @relation("LeaveRequester")
@@ -562,8 +579,10 @@ model Group {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  createdBy User?         @relation("GroupCreator", fields: [createdById], references: [id])
-  members   GroupMember[]
+  createdBy     User?          @relation("GroupCreator", fields: [createdById], references: [id])
+  members       GroupMember[]
+  conversations Conversation[]
+  announcements Announcement[]
 
   @@map("groups")
 }
@@ -646,47 +665,119 @@ model LeadFieldDefinition {
 // Communication (Dev B, Day 3)
 // ---------------------------------------------------------------------------
 
+/// A messaging thread. DIRECT is a 1:1 conversation between two users;
+/// GROUP is many-to-many (optionally mirroring an AD-03 `groups` row);
+/// BROADCAST is one Management/HR sender fanned out to many recipients who
+/// reply privately rather than to the whole list (CM-02).
+///
+/// Replaces the Day 1 `thread_key` + per-message recipient frame. Unread state
+/// lives on the PARTICIPANT (`lastReadAt`), not on every message row, so an
+/// unread count is one indexed comparison instead of a per-message join.
+model Conversation {
+  id        String           @id @default(cuid())
+  type      ConversationType @default(DIRECT)
+  /// Null for DIRECT — the title is the other participant's name.
+  title     String?
+  /// Set when a GROUP conversation mirrors an AD-03 group.
+  groupId   String?          @map("group_id")
+  /// Canonical key for DIRECT conversations: the two user ids sorted and
+  /// joined, "idA:idB". Null for GROUP and BROADCAST.
+  ///
+  /// The unique constraint is what makes a duplicate DM thread impossible.
+  /// find-then-create is not atomic: two concurrent requests (a double-clicked
+  /// "New message", or a broadcast racing a manual DM) can both see no thread
+  /// and both create one, silently splitting the conversation in two. Same
+  /// reasoning as Dev A's `lead_assignments_one_active_holder` — the database
+  /// is the guarantee, the application code is just the fast path.
+  pairKey   String?          @unique @map("pair_key")
+  createdById String         @map("created_by_id")
+  /// Denormalized from the newest message so the inbox list can sort without
+  /// touching `messages` at all.
+  lastMessageAt DateTime?    @map("last_message_at")
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  group        Group?                    @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  createdBy    User                      @relation("ConversationCreator", fields: [createdById], references: [id])
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([type, lastMessageAt])
+  @@index([groupId])
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  conversationId String    @map("conversation_id")
+  userId         String    @map("user_id")
+  /// CM-07 read state. Everything sent after this is unread for this user.
+  lastReadAt     DateTime? @map("last_read_at")
+  joinedAt       DateTime  @default(now()) @map("joined_at")
+  /// Leaving hides the thread without destroying history for anyone else.
+  leftAt         DateTime? @map("left_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation("ConversationMember", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId, leftAt])
+  @@map("conversation_participants")
+}
+
 model Message {
-  id        String   @id @default(cuid())
-  senderId  String   @map("sender_id")
-  threadKey String?  @map("thread_key")
-  body      String
-  sentAt    DateTime @default(now()) @map("sent_at")
+  id             String   @id @default(cuid())
+  conversationId String   @map("conversation_id")
+  senderId       String   @map("sender_id")
+  body           String
+  sentAt         DateTime @default(now()) @map("sent_at")
 
-  sender     User               @relation("MessageSender", fields: [senderId], references: [id])
-  recipients MessageRecipient[]
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation("MessageSender", fields: [senderId], references: [id])
 
+  // CM-07 searchable history: newest-first within a thread.
+  @@index([conversationId, sentAt])
   @@index([senderId, sentAt])
-  @@index([threadKey])
   @@map("messages")
 }
 
-model MessageRecipient {
-  messageId   String    @map("message_id")
-  recipientId String    @map("recipient_id")
-  readAt      DateTime? @map("read_at")
-
-  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  recipient User    @relation(fields: [recipientId], references: [id], onDelete: Cascade)
-
-  @@id([messageId, recipientId])
-  @@index([recipientId, readAt])
-  @@map("message_recipients")
-}
-
+/// CM-06 announcements. `audience` records the INTENT; `recipients` records
+/// who it actually reached, resolved at publish time. Keeping both matters for
+/// acknowledgement tracking: if an announcement targeted "all agents" and an
+/// agent joins next week, they were never required to acknowledge it, and the
+/// outstanding list must not suddenly grow a name.
 model Announcement {
-  id                      String   @id @default(cuid())
-  authorId                String   @map("author_id")
+  id                      String               @id @default(cuid())
+  authorId                String               @map("author_id")
   title                   String
   body                    String
-  requiresAcknowledgement Boolean  @default(false) @map("requires_acknowledgement")
-  publishedAt             DateTime @default(now()) @map("published_at")
+  audience                AnnouncementAudience @default(ALL)
+  /// Role name when audience = ROLE.
+  audienceRole            String?              @map("audience_role")
+  /// Group id when audience = GROUP.
+  audienceGroupId         String?              @map("audience_group_id")
+  requiresAcknowledgement Boolean              @default(false) @map("requires_acknowledgement")
+  publishedAt             DateTime             @default(now()) @map("published_at")
 
-  author           User                         @relation(fields: [authorId], references: [id])
+  author           User                          @relation(fields: [authorId], references: [id])
+  audienceGroup    Group?                        @relation(fields: [audienceGroupId], references: [id], onDelete: SetNull)
+  recipients       AnnouncementRecipient[]
   acknowledgements AnnouncementAcknowledgement[]
 
   @@index([publishedAt])
   @@map("announcements")
+}
+
+/// The resolved audience, frozen at publish time. One row per user who was
+/// meant to see this announcement.
+model AnnouncementRecipient {
+  announcementId String @map("announcement_id")
+  userId         String @map("user_id")
+
+  announcement Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user         User         @relation("AnnouncementRecipient", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([announcementId, userId])
+  @@index([userId])
+  @@map("announcement_recipients")
 }
 
 model AnnouncementAcknowledgement {

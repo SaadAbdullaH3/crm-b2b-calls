@@ -236,3 +236,96 @@ Day 9's NFR pass.
 **Next — Day 3:** Communication Module (CM-01…CM-08) + the notification pipeline Dev A consumes.
 Groups exist now, so group messaging has its target. The emit helper must not import `server-only`
 — the socket layer runs under tsx, not Next's bundler.
+
+### 2026-09-09 — Day 3: Communication Module (CM-01 … CM-08) + notification pipeline
+
+**Shipped**
+- **Schema reshaped** (`day3_conversations_announcement_targeting`, 31 tables now). Replaced the
+  Day 1 `thread_key` + `message_recipients` frame with a proper conversation model:
+  `conversations` / `conversation_participants` / `messages`. Unread state lives on the
+  PARTICIPANT (`lastReadAt`), so an unread count is one indexed comparison instead of a
+  per-message join. Added `announcement_recipients`, and `ConversationType` +
+  `AnnouncementAudience` enums.
+- **`src/lib/notifications.ts` — the shared pipeline Dev A consumes.** `notify()` /
+  `notifyMany()` persist to `notifications` and emit `NOTIFICATION_NEW`. Ten `NOTIFICATION.*`
+  type constants covering all of SRS §15. Deliberately never throws into the caller: a failed
+  notification must not roll back the lead assignment that triggered it.
+- CM-01/04 direct messages, CM-05 group conversations (from an AD-03 group or an ad-hoc list),
+  CM-02 broadcast to all/role/group/selection, CM-06 announcements with optional required
+  acknowledgement + who-has-and-hasn't tracking, CM-07 read state, unread counts and in-thread
+  search.
+- UI: `/messages` (inbox + thread + composer + broadcast) and `/announcements`, both reachable by
+  **all four roles**; notification bell in the app shell, live over Socket.io.
+- `src/lib/realtime/use-socket.ts` — one shared socket per tab, ref-counted so three subscribing
+  components don't open three connections.
+
+**Decisions**
+1. **A broadcast is N private DIRECT conversations, not one shared thread.** A reply to
+   "update your call notes" must reach the sender only — a shared thread would turn every
+   broadcast into a fifty-person group chat.
+2. **Announcement audience is resolved to concrete users at publish time** into
+   `announcement_recipients`. Storing only the intent ("all agents") would mean an agent hired
+   next month silently joins the outstanding-acknowledgement list for an announcement predating
+   them, and "who was told" would change retroactively.
+3. **Non-participants get 404, not 403**, on a conversation. 403 confirms the thread exists and
+   leaks who is talking to whom.
+4. **No cross-user message browsing for any role, Admin included.** CM-08 requires messages to
+   *retain* sender/recipient/timestamp for audit — not that an administrator can read everyone's
+   private threads from the UI.
+5. `socket.io-client` moved **devDependencies → dependencies**. Client code imports it; a
+   production `npm ci --omit=dev` would have failed the build.
+
+**Verified end to end (curl, real server)**
+- DM: conversation created → message sent → agent1 `unread=1` → notification row with type
+  `comms.message` → mark-read clears to 0 → reply → management `unread=1`. ✓
+- Broadcast to `role:agent` → delivered to 5. ✓
+- Announcement `ROLE:agent` + requiresAck → 5 outstanding → agent1 acknowledges → 4 outstanding /
+  1 acknowledged → double-acknowledge is idempotent (200, not a constraint error). ✓
+- Management sees **0** announcements from an agent-only audience (audience scoping holds). ✓
+- **IDOR:** agent2 requesting agent1's conversation → `404 NOT_FOUND`. ✓
+- `tsc --noEmit` clean, `npm run build` clean, `ƒ Proxy (Middleware)` present, dev log free of
+  errors. NF-07 index `lead_assignments_one_active_holder` re-verified after the migration.
+
+**For Dev A — the contract you need**
+```ts
+import { notify, NOTIFICATION } from "@/lib/notifications";
+await notify({
+  userId: agentId,
+  type: NOTIFICATION.LEAD_BATCH_ASSIGNED,   // never a string literal
+  title: "15 new leads assigned",
+  payload: { requestId },                    // ids only; this is broadcast-adjacent
+});
+```
+`notifyMany(userIds, {...})` for fan-out. Safe to call from cron — no `server-only` in the import
+chain. `NOTIFICATION.LEAD_*` / `CALLBACK_*` / `DNC_WARNING` are already defined for your paths.
+
+**Next — Day 4: Monitoring Engine.** Add `work_sessions` + `break_periods`; fill in the idle-sweep
+cron body Dev A stubbed on Day 1; read the threshold from `monitoring.config` via
+`getInactivityMs()`, never a hard-coded 5. **Re-verify the TM-05 boundary before closing the day.**
+
+**Day 3 addendum — Sourcery review fixes (3 of 4 accepted)**
+
+1. **Duplicate DIRECT conversations under concurrency — REAL, fixed.** `findOrCreateDirect` was
+   find-then-create with no constraint, so two simultaneous requests could both insert and split a
+   thread. Added `conversations.pair_key` (sorted user ids, `"idA:idB"`) with a **unique index**,
+   and the helper now catches P2002 and re-reads the winner. Migration
+   `day3_fix_direct_pair_key` **backfills existing rows** — without that they keep a NULL key, and
+   Postgres allows unlimited NULLs in a unique index, so old DMs would still be duplicable. Same
+   philosophy as Dev A's `lead_assignments_one_active_holder`: the database is the guarantee, the
+   application lookup is only the fast path. **Proved with 8 concurrent requests → 1 conversation.**
+2. **Mark-read swallowed in-flight messages — REAL, fixed.** The route used `now()`, so anything
+   arriving between the thread GET and the read request was marked read unseen. The client now
+   sends `upTo` (the newest message it actually rendered); the server clamps it to now and never
+   moves `lastReadAt` backwards. A bare POST with no body still means "everything up to now".
+   **Reproduced the race and confirmed the unseen message survives as unread.**
+3. **`/notifications` 404 — REAL, fixed.** The bell's fallback link pointed at a route that did not
+   exist, so every lead-assignment, callback, HR and system notification led nowhere. Built the
+   page (full history, type/unread filters, mark-all-read) plus a "See all" link in the bell.
+   Verified 200 for all four roles. This mattered more from Day 4 on, when Dev A starts emitting
+   `LEAD_BATCH_ASSIGNED`.
+4. **Migration destroys existing messages/announcements — NOT ACCEPTED, unreachable.** Correct in
+   the abstract, but no code path wrote to `messages` or `announcements` before Day 3 — `git log -S`
+   confirms `d605bc0` is the first and only commit creating either. `ADD COLUMN ... NOT NULL` on a
+   non-empty table also **fails loudly** in Postgres rather than corrupting silently, so the failure
+   mode described cannot occur. Backfill SQL for provably-empty tables would be dead code.
+   Documented here so it isn't re-raised.

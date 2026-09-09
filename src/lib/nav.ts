@@ -21,6 +21,8 @@ export const NAV: Record<string, NavItem[]> = {
     { href: "/agent/call-list", label: "Call List", day: 5 },
     { href: "/agent/callbacks", label: "Callbacks", day: 5 },
     { href: "/agent/request-leads", label: "Request Leads", day: 3 },
+    { href: "/messages", label: "Messages", day: 3 },
+    { href: "/announcements", label: "Announcements", day: 3 },
     // No monitoring/productivity entries here. See the TM-05 note above.
   ],
   management: [
@@ -30,6 +32,8 @@ export const NAV: Record<string, NavItem[]> = {
     { href: "/management/leads", label: "All Leads", day: 6 },
     { href: "/management/monitoring", label: "Agent Monitoring", day: 4 },
     { href: "/management/reports", label: "Reports", day: 7 },
+    { href: "/messages", label: "Messages", day: 3 },
+    { href: "/announcements", label: "Announcements", day: 3 },
   ],
   admin: [
     { href: "/admin", label: "Overview", day: 2 },
@@ -40,11 +44,15 @@ export const NAV: Record<string, NavItem[]> = {
     { href: "/admin/dialer", label: "Dialer Settings", day: 2 },
     { href: "/admin/settings", label: "Time & Breaks", day: 2 },
     { href: "/admin/audit", label: "Audit Log", day: 8 },
+    { href: "/messages", label: "Messages", day: 3 },
+    { href: "/announcements", label: "Announcements", day: 3 },
   ],
   hr: [
     { href: "/hr", label: "Overview", day: 5 },
     { href: "/hr/employees", label: "Employees", day: 5 },
     { href: "/hr/documents", label: "Documents", day: 5 },
     { href: "/hr/leave", label: "Leave Requests", day: 5 },
+    { href: "/messages", label: "Messages", day: 3 },
+    { href: "/announcements", label: "Announcements", day: 3 },
   ],
 };

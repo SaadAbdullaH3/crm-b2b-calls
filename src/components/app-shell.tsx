@@ -2,6 +2,7 @@ import Link from "next/link";
 import { NAV } from "@/lib/nav";
 import type { SessionUser } from "@/lib/auth/session";
 import { LogoutButton } from "@/components/logout-button";
+import { NotificationBell } from "@/components/notification-bell";
 
 /**
  * Shared chrome for every signed-in section. The nav is driven entirely by
@@ -19,9 +20,12 @@ export function AppShell({
   return (
     <div className="flex min-h-screen bg-muted/30">
       <aside className="flex w-64 shrink-0 flex-col border-r bg-background">
-        <div className="border-b px-5 py-4">
-          <p className="text-sm font-semibold tracking-tight">CRM — B2B Calls</p>
-          <p className="text-xs text-muted-foreground">{user.roleLabel}</p>
+        <div className="flex items-start justify-between border-b px-5 py-4">
+          <div>
+            <p className="text-sm font-semibold tracking-tight">CRM — B2B Calls</p>
+            <p className="text-xs text-muted-foreground">{user.roleLabel}</p>
+          </div>
+          <NotificationBell />
         </div>
 
         <nav className="flex-1 space-y-1 p-3">
