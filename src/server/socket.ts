@@ -10,7 +10,20 @@ import { resolveSessionFromToken, SESSION_COOKIE } from "@/lib/auth/session-core
  * without colliding with Next's own /_next/webpack-hmr socket.
  */
 
-let io: IOServer | null = null;
+/**
+ * The instance is parked on globalThis, NOT in a module-level `let`.
+ *
+ * server.ts runs through tsx and imports this file directly; Next.js bundles
+ * its own separate copy for route handlers. With a module-level variable those
+ * are two different modules with two different `io` bindings — the custom
+ * server sets one, and every `getIO()` inside an API route reads the other and
+ * gets null. Emits then vanish silently: no error, no event, and the socket
+ * handshake still works, so it looks fine until you actually wait for a push.
+ *
+ * That bit both tracks — Dev A's session and lead-request events, and every
+ * `notify()` push behind Dev B's notification bell.
+ */
+const globalForSocket = globalThis as unknown as { __crmSocketIO?: IOServer };
 
 export const SOCKET_PATH = "/api/socket";
 
@@ -30,13 +43,14 @@ function readCookie(cookieHeader: string | undefined, name: string): string | nu
 }
 
 export function initSocketServer(httpServer: HttpServer): IOServer {
-  if (io) return io;
+  if (globalForSocket.__crmSocketIO) return globalForSocket.__crmSocketIO;
 
-  io = new IOServer(httpServer, {
+  const io = new IOServer(httpServer, {
     path: SOCKET_PATH,
     serveClient: false,
     cors: { origin: false },
   });
+  globalForSocket.__crmSocketIO = io;
 
   // Authenticate on the handshake using the same session cookie the HTTP side
   // uses. An unauthenticated socket never joins a room and never receives an
@@ -86,7 +100,7 @@ export function initSocketServer(httpServer: HttpServer): IOServer {
  * so callers should treat emitting as best-effort and never block a DB write on it.
  */
 export function getIO(): IOServer | null {
-  return io;
+  return globalForSocket.__crmSocketIO ?? null;
 }
 
 /** Emit to every socket belonging to one user. */

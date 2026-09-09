@@ -152,3 +152,41 @@ Branch `deva/day-2-lead-import`. Adopted Dev B's convention: one branch per day,
 **Known issue, not mine to fix alone:** `npx eslint src` reports 13 errors — 11 pre-existing in Dev B's client components (`react-hooks/set-state-in-effect` on the standard `useEffect(() => { void load() })` loader, plus a ref-during-render in `use-socket.ts`), and 2 in my two new client components which follow the same house pattern. `next build` and `tsc --noEmit` are both clean. Fixing only mine would make two files diverge from nine siblings, so this is logged in GLOBAL.md as a shared cleanup for Day 9's NFR pass.
 
 **Next session — Day 3:** finish the import engine (LM-03 validation summary screen, LM-06 per-duplicate resolution, LM-07 error export, LM-08 source tagging, LM-09 import history) and start the Lead Assignment Engine request UI (LA-02/03). The `lead_import_rows` verdicts and `resolution` column are already in place for all of it. Coordinate the `request:submitted` event shape with Dev B — it is already defined in `src/lib/realtime/events.ts`.
+
+### 2026-09-09 — Day 3: Import Engine finished (LM-03/06/07/08/09) + Lead Requests started (LA-02/03)
+
+Branch `deva/day-3-import-finish-assignment-start`. Nothing new from Dev B to pull — their Day 3 was already merged before this session, so the "coordinate the notification contract with Dev B" step in the Day 3 prompt was already settled: their pipeline is live and I consumed it as-is.
+
+**Part 1 — Lead Import Engine, finished**
+- `src/lib/import/commit.ts` — the ONLY place the import engine writes to `leads`. Rows become leads per: READY → create; DUPLICATE + KEEP_BOTH → create; DUPLICATE + UPDATE_EXISTING → merge; REJECT / MANUAL_REVIEW → skip; MISSING_INFO / INVALID_PHONE / INVALID → skip and report.
+- `src/lib/import/report.ts` — LM-07 validation report as .xlsx (Summary sheet + per-row sheet with plain-English reasons). Excel not CSV, because the person fixing the data opens it beside the original and CSV mangles phone numbers.
+- Routes: `GET .../rows`, `POST .../resolutions` (single + `applyToAllPending`), `POST .../commit`, `GET .../report`.
+- `/management/imports/[id]/review` — LM-03 summary tiles, per-duplicate decision selects, bulk apply, source label, report download, commit.
+- LM-08 enforced at commit, not upload: an import cannot become leads without a source/campaign label.
+- LM-09 import history already existed from Day 2; the review screen completes it.
+
+**Part 2 — Lead Assignment Engine, started**
+- `POST/GET /api/leads/requests` (LA-02/03). `autoAssignAt` is stamped at creation, so the Day 4 sweep queries a column rather than relying on a timer surviving a restart.
+- `/agent/request-leads` — presets 15/30 fill the quantity field (they don't submit), plus free-text quantity, plus a cosmetic countdown.
+- `/management/requests` — live queue, refreshes on the `REQUEST_SUBMITTED` socket event.
+- One PENDING request per agent, enforced server-side. Without it an agent could queue several and have Day 4's job hand them several batches at once, draining the pool from everyone else.
+- Added `assignment.config` to Dev B's settings registry (`autoAssignMinutes: 5`, `presetQuantities`, `maxRequestQuantity: 100`) + `getAutoAssignMs()`. Uses their sanctioned mechanism — a registry entry, not a migration — and `getSetting` falls back to the catalogue default, so no re-seed is needed. **Day 4 must read this, not hard-code 5 minutes.**
+
+**TWO REAL BUGS FOUND AND FIXED — both were silent**
+
+1. **Socket emits from API routes never reached anyone.** `src/server/socket.ts` held the Socket.io instance in a module-level `let`. `server.ts` runs through tsx and imports that file directly; Next bundles its own separate copy for route handlers. Two modules, two bindings — the custom server set one, every `getIO()` inside a route read the other and got `null`. Emits vanished with no error, and the handshake still worked, so it looked healthy. **This silently broke Dev A's session + lead-request events AND every `notify()` push behind Dev B's notification bell.** Fixed by parking the instance on `globalThis`. Verified: a management socket now receives both `notification:new` and `request:submitted`. Note this requires a dev-server restart to take effect — `socket.ts` is not hot-reloaded, since tsx loads it outside Next.
+
+2. **Duplicate matching picked an arbitrary lead when several matched.** `fetchCandidates` had no ORDER BY and the matcher took the first hit. With two leads sharing a phone number, a row that matched one of them on all five fields merged into the other, which matched on phone alone — non-deterministic and wrong. Fixed with `ORDER BY created_at ASC, id ASC` plus a `bestMatch()` that scores candidates by number of matched fields and tie-breaks on the oldest. Caught only because the UPDATE_EXISTING test asserted on which lead changed.
+
+**Merge safety (verified, matters for Day 4):** `UPDATE_EXISTING` merges only non-empty incoming fields and **never touches `assigned_to_id`, `locked_at`, `current_assignment_id` or `do_not_call`.** Proven with a lead that was ASSIGNED + DNC before the merge: data updated, ownership and the DNC flag survived. An import must not steal a lead from an agent mid-call or silently un-suppress a Do-Not-Call contact.
+
+**Verified end to end**
+- Full lifecycle: upload → map → analyse → resolve → commit. 11-row fixture → 7 leads created, 4 skipped; re-import with UPDATE_EXISTING → 0 created, 7 updated, lead count unchanged.
+- Commit blocked without a source label (400) and with unresolved duplicates (409).
+- Report downloads as real .xlsx with correct MIME + filename; two sheets; reasons render.
+- Leads land AVAILABLE and unassigned, phones E.164-normalised (including numeric Excel cells), emails lowercased, websites host-normalised, source label applied.
+- Requests: preset → PRESET_15, second pending → 409, over-max → 400, management → 403 (no `leads.request`), agent sees only their own, notification reached both approvers.
+- Review screen rendered in a real browser against live data.
+- Build + typecheck clean. Lint: 16 errors, all the same two pre-existing classes (15 `set-state-in-effect`, 1 `refs`) — 3 more than Day 2 because my 3 new client components follow the same house pattern. Still logged as a joint cleanup for Day 9.
+
+**Next session — Day 4:** the correctness-critical day. Approval screen, the 5-minute auto-assign cron (read `getAutoAssignMs()`), transactional locking, logout-return (LA-09) and retained-follow-up (LA-10), manual assign/reassign. The assignment transaction recipe is in the Day 1 entry above — `FOR UPDATE SKIP LOCKED`, insert assignment row, update lead ownership, all in one transaction. There are now real leads to assign and real requests to approve.

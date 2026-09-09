@@ -10,7 +10,14 @@
  * `system_settings` is key/value + Json.
  */
 
-export type SettingCategory = "dialer" | "monitoring" | "shift" | "notifications" | "reports";
+export type SettingCategory =
+  | "dialer"
+  | "monitoring"
+  | "shift"
+  | "notifications"
+  | "reports"
+  /** Dev A, Day 3: lead request / auto-assign tuning (LA-02, LA-03, LA-05). */
+  | "assignment";
 
 export interface SettingDef<T = unknown> {
   key: string;
@@ -47,6 +54,17 @@ export interface MonitoringConfig {
   breakMinutesPerShift: number;
   /** TM-04. Longest single break before it is flagged. */
   maxSingleBreakMinutes: number;
+}
+
+export interface AssignmentConfig {
+  /** LA-05. Minutes a lead request waits for Management before the server-side
+   *  job assigns it automatically. The countdown an agent sees is cosmetic;
+   *  this is the number the cron actually uses. */
+  autoAssignMinutes: number;
+  /** LA-02. Preset quantity buttons on the agent's request form. */
+  presetQuantities: number[];
+  /** Largest quantity an agent may request in one go. */
+  maxRequestQuantity: number;
 }
 
 export interface ShiftConfig {
@@ -98,6 +116,19 @@ export const SETTINGS = {
       maxSingleBreakMinutes: 30,
     } as MonitoringConfig,
   } satisfies SettingDef<MonitoringConfig>,
+
+  "assignment.config": {
+    key: "assignment.config",
+    category: "assignment",
+    label: "Lead request and assignment",
+    description:
+      "Auto-assign window and request quantity limits (LA-02, LA-03, LA-05).",
+    default: {
+      autoAssignMinutes: 5,
+      presetQuantities: [15, 30],
+      maxRequestQuantity: 100,
+    } as AssignmentConfig,
+  } satisfies SettingDef<AssignmentConfig>,
 
   "shift.config": {
     key: "shift.config",
