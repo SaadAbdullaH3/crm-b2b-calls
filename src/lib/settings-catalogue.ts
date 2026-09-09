@@ -65,6 +65,23 @@ export interface AssignmentConfig {
   presetQuantities: number[];
   /** Largest quantity an agent may request in one go. */
   maxRequestQuantity: number;
+  /**
+   * LA-09/LA-10. When an agent logs out, should a lead they dialled but got no
+   * answer on go back to the shared pool?
+   *
+   * Default false, matching the SRS wording ("only truly untouched leads
+   * return", "logout-returns-UNCALLED-leads"): a dialled lead stays with the
+   * agent. The spec is ambiguous though — the same rule protects "leads with an
+   * active disposition (Call Back Later, Email, Successful-Qualify)", and No
+   * Answer is not one of those.
+   *
+   * It matters more than it looks: No Answer is the most common outcome in a
+   * call centre, so this flag decides the fate of most worked leads every
+   * night. Left false means an absent agent's leads stay frozen until
+   * Management releases them by hand. Awaiting the call-centre owner's answer;
+   * a config change, not a code change, when it comes.
+   */
+  returnNoAnswerOnLogout: boolean;
 }
 
 export interface ShiftConfig {
@@ -127,6 +144,7 @@ export const SETTINGS = {
       autoAssignMinutes: 5,
       presetQuantities: [15, 30],
       maxRequestQuantity: 100,
+      returnNoAnswerOnLogout: false,
     } as AssignmentConfig,
   } satisfies SettingDef<AssignmentConfig>,
 

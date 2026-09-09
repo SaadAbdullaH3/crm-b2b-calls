@@ -224,7 +224,7 @@ Transaction timeout is raised to 30s (`TX_OPTIONS`): a 100-lead batch is 100 ins
 1. *Two agents, same lead* — solved by SKIP LOCKED. Proven by the concurrency script.
 2. *Management and the cron resolving the same request* — solved by a conditional claim: `UPDATE lead_requests ... WHERE status='PENDING'`, continue only if exactly one row changed. Verified with 6 concurrent approvals of one request: exactly one 200, five 409s, and the agent received one batch of 5 rather than six batches.
 
-**JUDGEMENT CALL — Saad to confirm before Day 10.** LA-09/LA-10 return leads where `last_disposition_code IS NULL`, i.e. **only never-touched leads return**. That follows the brief literally ("only truly untouched leads return"), and it means a lead dispositioned **No Answer stays locked to the agent overnight** rather than going back for someone else to retry. The alternative — return anything whose disposition is not an active follow-up, using the `dispositions.is_follow_up` flag I added on Day 1 — would re-pool No Answer leads at the risk of a prospect hearing from two agents. Management's manual release covers the stranded case either way. Flagged in GLOBAL.md too.
+**RESOLVED — now a setting, not a guess.** (See the follow-up note at the end of this entry.) Originally written as a judgement call: LA-09/LA-10 return leads where `last_disposition_code IS NULL`, i.e. **only never-touched leads return**. That follows the brief literally ("only truly untouched leads return"), and it means a lead dispositioned **No Answer stays locked to the agent overnight** rather than going back for someone else to retry. The alternative — return anything whose disposition is not an active follow-up, using the `dispositions.is_follow_up` flag I added on Day 1 — would re-pool No Answer leads at the risk of a prospect hearing from two agents. Management's manual release covers the stranded case either way. Flagged in GLOBAL.md too.
 
 **A test-harness bug worth remembering.** The first concurrency script asserted against its own tagged rows and reported 3 failures the moment the database also held other available leads — the product was correct, the harness was lying. It now snapshots the real available pool, asserts against that, and returns any pre-existing lead it borrowed. **A flaky correctness test is worse than none**: if this ever fails, read which assertion failed before assuming the product is broken. "No lead handed to two agents" is the one that matters.
 
@@ -250,5 +250,22 @@ Note for future browser testing on this machine: coordinate clicks silently miss
 **Two real defects found by that pass, both fixed — and both introduced by making the window configurable:**
 1. **Preset buttons ignored the setting.** `assignment.config.presetQuantities` existed and the API validated against it, but the agent page hard-coded `[15, 30]` — configurable in name only. `GET /api/leads/requests` now returns `presetQuantities` / `maxRequestQuantity` / `autoAssignMinutes` and the form renders from them. Verified: setting `[10,25,50]` changed what the API serves, and deleting the row fell back to the catalogue default.
 2. **Countdown broke past an hour.** A two-hour window rendered as `119:31`, which reads as under two minutes. Extracted a shared `src/components/countdown.tsx` that switches to `h:mm:ss`; both screens use it instead of duplicating the formatter. Only reachable because Admin can now raise `autoAssignMinutes` — at the default 5 minutes it never showed.
+
+
+**Follow-up: the No Answer question is now `assignment.config.returnNoAnswerOnLogout`, default `false`.**
+
+Saad approved returning No Answer leads to the pool *conditional on it aligning with the spec*. Re-reading the source documents, it does not — three of four phrasings favour keeping them:
+- Day 4 rule 4: "leads with **no disposition yet** return"
+- Day 4 rule 5: "only **truly untouched** leads return"
+- Build plan: "logout-**returns-uncalled-leads** rule" — a No Answer lead *was* called
+- Only rule 5's list, "an active disposition (Call Back Later, Email, Successful-Qualify)", points the other way, since No Answer is absent from it
+
+The condition wasn't met, so the default was NOT changed on my own judgement. But the tension is real: as built, that enumerated list does no work at all, because every disposition retains. A spec clause that changes nothing usually means something narrower was intended.
+
+So it is a flag. `false` is exactly the previous, spec-aligned behaviour — nothing changes unless someone deliberately turns it on — and when the call-centre owner answers, it is a config change rather than a code change. Call Back Later / Email / Qualified stay with the agent in both positions.
+
+Verified both ways against a 7 untouched + 3 No Answer + 3 Call Back Later mix: off → 7 returned; on → 10 returned, only Call Back Later retained.
+
+**This is a question for the client, not for us.** Whoever runs the call centre should decide whether a lead that rang out belongs to the agent who dialled it. Put it to them before Day 10.
 
 **Next — Day 5:** Agent Calling Workspace. Call List, VC Dialer handoff with mandatory clipboard fallback, the 6 dispositions, callback scheduling. Day 5 is what finally writes `last_disposition_code`, which is the field the whole logout-return rule keys off — so the retained-follow-up behaviour becomes real then. Check `GLOBAL.md` for VC Dialer status first, and read `dialer.config` rather than assuming.

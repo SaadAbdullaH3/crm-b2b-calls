@@ -1,11 +1,13 @@
 import {
   AssignmentMethod,
+  DispositionCode,
   LeadStatus,
   Prisma,
   ReleaseReason,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { getSetting } from "@/lib/settings";
 import { notify, notifyMany, NOTIFICATION } from "@/lib/notifications";
 import { EVENTS, emitToUser, emitToRole } from "@/server/socket";
 import type { LeadAssignedPayload, LeadReleasedPayload } from "@/lib/realtime/events";
@@ -337,26 +339,42 @@ export async function releaseLeads(args: ReleaseArgs): Promise<string[]> {
  * Returns leads the agent never actually worked. A lead counts as "touched"
  * once it carries ANY disposition, and touched leads stay with the agent.
  *
- * DELIBERATE READING, flagged for Saad: the Day 4 brief says "any of their
- * leads with no disposition yet return" and "only truly untouched leads
- * return", so the test is `last_disposition_code IS NULL` rather than the
- * `dispositions.is_follow_up` flag. That means a lead dispositioned No Answer
- * stays locked to the agent overnight.
+ * WHAT COUNTS AS TOUCHED is Admin-configurable, because the SRS is genuinely
+ * ambiguous about it and the answer belongs to the call-centre owner:
  *
- * The alternative reading — return anything whose disposition is not an active
- * follow-up — would re-pool No Answer leads so another agent can retry them,
- * at the cost of a prospect potentially hearing from two different agents.
- * Management's manual release (LA-06) covers the stranded-leads case either
- * way, so this takes the safer, literal reading. Confirm before Day 10.
+ *   default (returnNoAnswerOnLogout = false)
+ *     Only leads with NO disposition return. Matches the SRS wording — "any of
+ *     their leads with no disposition yet", "only truly untouched leads
+ *     return", and the build plan's "logout-returns-UNCALLED-leads rule". A
+ *     lead that was dialled and rang out stays with the agent.
+ *
+ *   returnNoAnswerOnLogout = true
+ *     No Answer also returns. Supported by the same rule's other half, which
+ *     protects "leads with an active disposition (Call Back Later, Email,
+ *     Successful-Qualify)" — a list No Answer is absent from.
+ *
+ * This is not a cosmetic toggle: No Answer is the most common outcome in a call
+ * centre, so it decides the fate of most worked leads every night. Left false,
+ * an absent agent's leads stay frozen until Management releases them by hand.
+ *
+ * Call Back Later, Email and Qualified always stay with the agent either way —
+ * those carry a promise to a specific person.
  */
 export async function returnUncalledLeads(
   agentId: string,
   reason: ReleaseReason = ReleaseReason.LOGOUT_RETURN,
 ): Promise<string[]> {
+  const { returnNoAnswerOnLogout } = await getSetting("assignment.config");
+
   const untouched = await prisma.lead.findMany({
     where: {
       assignedToId: agentId,
-      lastDispositionCode: null,
+      OR: returnNoAnswerOnLogout
+        ? [
+            { lastDispositionCode: null },
+            { lastDispositionCode: DispositionCode.NO_ANSWER },
+          ]
+        : [{ lastDispositionCode: null }],
     },
     select: { id: true },
   });
