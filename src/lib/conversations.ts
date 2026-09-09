@@ -11,37 +11,55 @@
 import { ConversationType } from "@prisma/client";
 import { prisma } from "@/lib/db";
 
-/** Deterministic pair key so two users never end up with two DM threads. */
+/** Canonical, order-independent key for a pair of users. */
+export function directPairKey(userA: string, userB: string): string {
+  return [userA, userB].sort().join(":");
+}
+
+/**
+ * Returns the DIRECT conversation between two users, creating it if absent.
+ *
+ * Concurrency-safe. find-then-create is not atomic — two simultaneous requests
+ * can both find nothing and both insert, splitting the thread. The unique
+ * index on `pair_key` rejects the second insert, and we then re-read the
+ * winner's row. Losing that race is normal, not an error.
+ */
 export async function findOrCreateDirect(
   userA: string,
   userB: string,
 ): Promise<string> {
   if (userA === userB) throw new Error("Cannot open a direct conversation with yourself.");
 
-  // Both participants, DIRECT, exactly two members.
-  const existing = await prisma.conversation.findFirst({
-    where: {
-      type: ConversationType.DIRECT,
-      AND: [
-        { participants: { some: { userId: userA } } },
-        { participants: { some: { userId: userB } } },
-      ],
-    },
-    select: { id: true, participants: { select: { userId: true } } },
-  });
+  const pairKey = directPairKey(userA, userB);
 
-  if (existing && existing.participants.length === 2) return existing.id;
-
-  const created = await prisma.conversation.create({
-    data: {
-      type: ConversationType.DIRECT,
-      createdById: userA,
-      participants: { create: [{ userId: userA }, { userId: userB }] },
-    },
+  const existing = await prisma.conversation.findUnique({
+    where: { pairKey },
     select: { id: true },
   });
+  if (existing) return existing.id;
 
-  return created.id;
+  try {
+    const created = await prisma.conversation.create({
+      data: {
+        type: ConversationType.DIRECT,
+        pairKey,
+        createdById: userA,
+        participants: { create: [{ userId: userA }, { userId: userB }] },
+      },
+      select: { id: true },
+    });
+    return created.id;
+  } catch (e) {
+    // P2002 = the other request won. Its conversation is the real one.
+    if (typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002") {
+      const winner = await prisma.conversation.findUnique({
+        where: { pairKey },
+        select: { id: true },
+      });
+      if (winner) return winner.id;
+    }
+    throw e;
+  }
 }
 
 /** Null when the user is not an active participant. */

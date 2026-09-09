@@ -109,7 +109,15 @@ export function MessagesClient({
         // Only clear unread on an unfiltered read — a search result isn't
         // proof the user saw everything in the thread.
         if (!q) {
-          await fetch(`/api/messages/conversations/${id}/read`, { method: "POST" });
+          // Mark read only up to the newest message we actually rendered.
+          // Sending nothing would let the server use now() and swallow
+          // anything that arrived while this request was in flight.
+          const newest = data.messages.at(-1)?.sentAt;
+          await fetch(`/api/messages/conversations/${id}/read`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ upTo: newest ?? new Date().toISOString() }),
+          });
           await loadConversations();
         }
       } catch (e) {

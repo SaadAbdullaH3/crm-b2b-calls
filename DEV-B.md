@@ -302,3 +302,30 @@ chain. `NOTIFICATION.LEAD_*` / `CALLBACK_*` / `DNC_WARNING` are already defined 
 **Next — Day 4: Monitoring Engine.** Add `work_sessions` + `break_periods`; fill in the idle-sweep
 cron body Dev A stubbed on Day 1; read the threshold from `monitoring.config` via
 `getInactivityMs()`, never a hard-coded 5. **Re-verify the TM-05 boundary before closing the day.**
+
+**Day 3 addendum — Sourcery review fixes (3 of 4 accepted)**
+
+1. **Duplicate DIRECT conversations under concurrency — REAL, fixed.** `findOrCreateDirect` was
+   find-then-create with no constraint, so two simultaneous requests could both insert and split a
+   thread. Added `conversations.pair_key` (sorted user ids, `"idA:idB"`) with a **unique index**,
+   and the helper now catches P2002 and re-reads the winner. Migration
+   `day3_fix_direct_pair_key` **backfills existing rows** — without that they keep a NULL key, and
+   Postgres allows unlimited NULLs in a unique index, so old DMs would still be duplicable. Same
+   philosophy as Dev A's `lead_assignments_one_active_holder`: the database is the guarantee, the
+   application lookup is only the fast path. **Proved with 8 concurrent requests → 1 conversation.**
+2. **Mark-read swallowed in-flight messages — REAL, fixed.** The route used `now()`, so anything
+   arriving between the thread GET and the read request was marked read unseen. The client now
+   sends `upTo` (the newest message it actually rendered); the server clamps it to now and never
+   moves `lastReadAt` backwards. A bare POST with no body still means "everything up to now".
+   **Reproduced the race and confirmed the unseen message survives as unread.**
+3. **`/notifications` 404 — REAL, fixed.** The bell's fallback link pointed at a route that did not
+   exist, so every lead-assignment, callback, HR and system notification led nowhere. Built the
+   page (full history, type/unread filters, mark-all-read) plus a "See all" link in the bell.
+   Verified 200 for all four roles. This mattered more from Day 4 on, when Dev A starts emitting
+   `LEAD_BATCH_ASSIGNED`.
+4. **Migration destroys existing messages/announcements — NOT ACCEPTED, unreachable.** Correct in
+   the abstract, but no code path wrote to `messages` or `announcements` before Day 3 — `git log -S`
+   confirms `d605bc0` is the first and only commit creating either. `ADD COLUMN ... NOT NULL` on a
+   non-empty table also **fails loudly** in Postgres rather than corrupting silently, so the failure
+   mode described cannot occur. Backfill SQL for provably-empty tables would be dead code.
+   Documented here so it isn't re-raised.

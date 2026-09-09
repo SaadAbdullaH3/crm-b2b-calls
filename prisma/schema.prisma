@@ -680,6 +680,16 @@ model Conversation {
   title     String?
   /// Set when a GROUP conversation mirrors an AD-03 group.
   groupId   String?          @map("group_id")
+  /// Canonical key for DIRECT conversations: the two user ids sorted and
+  /// joined, "idA:idB". Null for GROUP and BROADCAST.
+  ///
+  /// The unique constraint is what makes a duplicate DM thread impossible.
+  /// find-then-create is not atomic: two concurrent requests (a double-clicked
+  /// "New message", or a broadcast racing a manual DM) can both see no thread
+  /// and both create one, silently splitting the conversation in two. Same
+  /// reasoning as Dev A's `lead_assignments_one_active_holder` — the database
+  /// is the guarantee, the application code is just the fast path.
+  pairKey   String?          @unique @map("pair_key")
   createdById String         @map("created_by_id")
   /// Denormalized from the newest message so the inbox list can sort without
   /// touching `messages` at all.
