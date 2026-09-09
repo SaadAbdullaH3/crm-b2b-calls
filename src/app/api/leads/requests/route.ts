@@ -47,7 +47,18 @@ export const GET = requireAuth(async (req, { user }) => {
     },
   });
 
-  return ok({ requests, canSeeAll });
+  // The agent form needs the configured presets and limit. Returned here
+  // rather than hard-coded in the client, so changing assignment.config
+  // actually changes the buttons an agent sees.
+  const config = await getSetting("assignment.config");
+
+  return ok({
+    requests,
+    canSeeAll,
+    presetQuantities: config.presetQuantities,
+    maxRequestQuantity: config.maxRequestQuantity,
+    autoAssignMinutes: config.autoAssignMinutes,
+  });
 });
 
 export const POST = requirePermission("leads.request", async (req, { user }) => {

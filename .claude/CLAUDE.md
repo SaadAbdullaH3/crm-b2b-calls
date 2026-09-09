@@ -190,3 +190,65 @@ Branch `deva/day-3-import-finish-assignment-start`. Nothing new from Dev B to pu
 - Build + typecheck clean. Lint: 16 errors, all the same two pre-existing classes (15 `set-state-in-effect`, 1 `refs`) — 3 more than Day 2 because my 3 new client components follow the same house pattern. Still logged as a joint cleanup for Day 9.
 
 **Next session — Day 4:** the correctness-critical day. Approval screen, the 5-minute auto-assign cron (read `getAutoAssignMs()`), transactional locking, logout-return (LA-09) and retained-follow-up (LA-10), manual assign/reassign. The assignment transaction recipe is in the Day 1 entry above — `FOR UPDATE SKIP LOCKED`, insert assignment row, update lead ownership, all in one transaction. There are now real leads to assign and real requests to approve.
+
+### 2026-09-09 — Day 4: Lead Assignment Engine core (LA-04…LA-10, NF-07)
+
+Branch `deva/day-4-assignment-engine`. **Held uncommitted at Saad's request pending review.**
+
+**The locking implementation — read this before touching assignment**
+
+`src/server/leads/assignment.ts` is the single place lead ownership changes. Approval, the auto-assign job, manual assignment and the logout-return rule all route through it. The transaction, exactly as recorded on Day 1:
+
+1. `SELECT ... FROM leads WHERE status='AVAILABLE' AND assigned_to_id IS NULL AND do_not_call=false ORDER BY created_at LIMIT n FOR UPDATE SKIP LOCKED`
+2. insert the append-only `lead_assignments` row
+3. update the lead's ownership columns including `current_assignment_id`
+
+`SKIP LOCKED` is what makes simultaneous requests safe: the second transaction doesn't block, it skips whatever the first has locked and takes the next rows. Release is the mirror image — stamp `released_at` + `release_reason`, then clear the lead's ownership columns. The partial unique index is the backstop underneath, never the mechanism.
+
+Transaction timeout is raised to 30s (`TX_OPTIONS`): a 100-lead batch is 100 inserts plus 100 updates and blows Prisma's 5s default.
+
+**FOR DEV B — login/logout state now has consequences.** Their Monitoring Engine and my lead-return rule read the same `sessions` table:
+- Logout returns uncalled leads synchronously, inside `POST /api/auth/logout`.
+- Return only fires when the agent has **no remaining active session** (`returnUncalledLeadsIfSignedOut`). Someone signed in on two machines who closes one has not logged out, and pulling their leads mid-call would be worse than leaving them.
+- A third cron job (`expired-session lead return`) catches the closed-browser case, where no logout request is ever sent. **Cron count is now 3.** If Dev B changes session semantics — shorter expiry, forced single session — it changes when leads come back.
+
+**Built**
+- LA-04 approval: `POST /api/leads/requests/[id]/resolve` with APPROVE / REJECT. "Modify" is APPROVE with a different quantity, so `quantityRequested` and `quantityApproved` both survive on the row.
+- LA-05 auto-assign: `runAutoAssignSweep()` on the every-minute cron, selecting on `auto_assign_at`. Reads `getAutoAssignMs()` — **not hard-coded**.
+- LA-06/07/08 manual: `POST /api/leads/assign` (assign / transfer / reassign) and `POST /api/leads/release`, plus `/management/leads` to drive them. A transfer closes the old assignment and opens a new one in one transaction, so history shows both and there is never a moment with two open rows.
+- LA-09/LA-10 logout return, described above.
+- `GET /api/leads` (minimal listing, grows into Day 6's SF-01/02) and `GET /api/leads/agents`.
+- `scripts/assignment-concurrency-test.ts` — the NF-07 proof.
+
+**Two races, both closed**
+1. *Two agents, same lead* — solved by SKIP LOCKED. Proven by the concurrency script.
+2. *Management and the cron resolving the same request* — solved by a conditional claim: `UPDATE lead_requests ... WHERE status='PENDING'`, continue only if exactly one row changed. Verified with 6 concurrent approvals of one request: exactly one 200, five 409s, and the agent received one batch of 5 rather than six batches.
+
+**JUDGEMENT CALL — Saad to confirm before Day 10.** LA-09/LA-10 return leads where `last_disposition_code IS NULL`, i.e. **only never-touched leads return**. That follows the brief literally ("only truly untouched leads return"), and it means a lead dispositioned **No Answer stays locked to the agent overnight** rather than going back for someone else to retry. The alternative — return anything whose disposition is not an active follow-up, using the `dispositions.is_follow_up` flag I added on Day 1 — would re-pool No Answer leads at the risk of a prospect hearing from two agents. Management's manual release covers the stranded case either way. Flagged in GLOBAL.md too.
+
+**A test-harness bug worth remembering.** The first concurrency script asserted against its own tagged rows and reported 3 failures the moment the database also held other available leads — the product was correct, the harness was lying. It now snapshots the real available pool, asserts against that, and returns any pre-existing lead it borrowed. **A flaky correctness test is worse than none**: if this ever fails, read which assertion failed before assuming the product is broken. "No lead handed to two agents" is the one that matters.
+
+**Also fixed:** the agent picker listed **Admin**, who holds every permission including `leads.read.own`. Leads assigned there sit outside every call list. Both `/api/leads/agents` and `POST /api/leads/assign` now exclude roles holding `leads.approve` — and they must keep matching, or the picker hides someone the API still accepts.
+
+**Verified**
+- Concurrency: 5 agents × 10 requested against a 30-lead pool, ×5 runs — no lead twice, pool exhausted exactly, DB invariants hold, pool restored after.
+- Approve (15/15), modify (30 requested → 5 approved → 5 assigned), reject, double-resolve → 409.
+- Auto-assign fired from cron: `AUTO_ASSIGNED`, 8 assigned, `reviewed_by_id` null (system), resolved.
+- Logout: 7 uncalled returned, 5 Call Back Later + 3 No Answer retained, history rows stamped `LOGOUT_RETURN`.
+- Expired-session sweep: 3 returned, 2 Email follow-ups retained.
+- Transfer history for one lead: original row closed `REASSIGNED`, new `REASSIGN` row open, pointer correct.
+- Guards: DNC skipped, HR/Admin refused, agent 403 on assign/release/agents, agent 307 → /403 on `/management/leads`.
+- Build + typecheck clean. Lint 17 (was 16) — same two pre-existing classes.
+
+
+**UI gap-closing pass (same day, after Saad asked for it)**
+
+Drove every Day 4 screen in a real browser rather than trusting that a 200 from the API meant the button was wired. All four previously-untested paths work: approve / reject / **modify quantity** (typed 3 against a request for 10 → `MODIFIED`, approved 3, assigned 3), manual transfer and release (history chain intact: `REQUEST_APPROVED` → `REASSIGNED` → `REASSIGN` → `RELEASED_BY_MANAGEMENT`), both socket subscriptions (queue repainted 5→6 rows on a new request, and cleared when a request was resolved from a different client), and the agent form (preset fills the field without submitting, countdown runs, presets disable while a request is pending).
+
+Note for future browser testing on this machine: coordinate clicks silently miss in the hidden preview pane — the first Approve click reported success and did nothing. Dispatching the click through `javascript_tool` fires the same React handler and is reliable. **If a UI click appears to do nothing here, check the network panel before concluding the product is broken.**
+
+**Two real defects found by that pass, both fixed — and both introduced by making the window configurable:**
+1. **Preset buttons ignored the setting.** `assignment.config.presetQuantities` existed and the API validated against it, but the agent page hard-coded `[15, 30]` — configurable in name only. `GET /api/leads/requests` now returns `presetQuantities` / `maxRequestQuantity` / `autoAssignMinutes` and the form renders from them. Verified: setting `[10,25,50]` changed what the API serves, and deleting the row fell back to the catalogue default.
+2. **Countdown broke past an hour.** A two-hour window rendered as `119:31`, which reads as under two minutes. Extracted a shared `src/components/countdown.tsx` that switches to `h:mm:ss`; both screens use it instead of duplicating the formatter. Only reachable because Admin can now raise `autoAssignMinutes` — at the default 5 minutes it never showed.
+
+**Next — Day 5:** Agent Calling Workspace. Call List, VC Dialer handoff with mandatory clipboard fallback, the 6 dispositions, callback scheduling. Day 5 is what finally writes `last_disposition_code`, which is the field the whole logout-return rule keys off — so the retained-follow-up behaviour becomes real then. Check `GLOBAL.md` for VC Dialer status first, and read `dialer.config` rather than assuming.

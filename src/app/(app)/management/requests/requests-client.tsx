@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -11,6 +14,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PageHeader, EmptyState, ErrorNote, api } from "@/components/admin/admin-ui";
+import { Countdown } from "@/components/countdown";
 import { useSocketEvent } from "@/lib/realtime/use-socket";
 import { EVENTS } from "@/lib/realtime/events";
 
@@ -44,27 +48,13 @@ const STATUS_TONE: Record<string, "default" | "secondary" | "destructive" | "out
   CANCELLED: "secondary",
 };
 
-function Countdown({ target }: { target: string }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  const ms = new Date(target).getTime() - now;
-  if (ms <= 0) return <span className="text-muted-foreground">due</span>;
-  const total = Math.floor(ms / 1000);
-  return (
-    <span className="tabular-nums">
-      {Math.floor(total / 60)}:{String(total % 60).padStart(2, "0")}
-    </span>
-  );
-}
-
 export function RequestsClient() {
   const [requests, setRequests] = useState<LeadRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  /** Per-row quantity override, so "modify" is just approving a different number. */
+  const [amounts, setAmounts] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -88,14 +78,52 @@ export function RequestsClient() {
     void load();
   });
 
+  // Also refresh when the auto-assign job resolves one, so a request doesn't
+  // sit on screen showing Approve buttons that will now fail.
+  useSocketEvent(EVENTS.REQUEST_RESOLVED, () => {
+    void load();
+  });
+
   const pending = requests.filter((r) => r.status === "PENDING");
+
+  async function resolve(id: string, action: "APPROVE" | "REJECT") {
+    setBusyId(id);
+    setError(null);
+    try {
+      const raw = amounts[id];
+      const quantity = action === "APPROVE" && raw ? Number(raw) : undefined;
+      if (quantity !== undefined && (!Number.isInteger(quantity) || quantity < 1)) {
+        setError("Quantity must be a whole number of at least 1.");
+        return;
+      }
+
+      const res = await api<{ assigned: number }>(
+        `/api/leads/requests/${id}/resolve`,
+        { method: "POST", json: { action, ...(quantity ? { quantity } : {}) } },
+      );
+
+      toast.success(
+        action === "REJECT"
+          ? "Request rejected."
+          : `Assigned ${res.assigned} lead${res.assigned === 1 ? "" : "s"}.`,
+      );
+      await load();
+    } catch (e) {
+      // The most likely failure is the auto-assign job having claimed it first,
+      // which the API reports explicitly rather than silently double-assigning.
+      setError(e instanceof Error ? e.message : "Could not action that request.");
+      await load();
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   return (
     <div className="mx-auto max-w-5xl">
       <PageHeader
         title="Lead Requests"
         requirement="LA-03"
-        description="Requests from agents for more leads. Approving, rejecting and modifying arrive on Day 4 — this is the live queue."
+        description="Approve, reject, or change the quantity. Anything left un-actioned is assigned automatically by the server when its countdown runs out."
       />
 
       {pending.length > 0 ? (
@@ -122,6 +150,7 @@ export function RequestsClient() {
                 <TableHead>Submitted</TableHead>
                 <TableHead>Auto-assigns in</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="w-72">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -151,6 +180,45 @@ export function RequestsClient() {
                     <Badge variant={STATUS_TONE[r.status] ?? "secondary"}>
                       {r.status.replace(/_/g, " ").toLowerCase()}
                     </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {r.status === "PENDING" ? (
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min={1}
+                          className="w-20"
+                          aria-label={`Quantity to assign to ${r.agent.fullName}`}
+                          placeholder={String(r.quantityRequested)}
+                          value={amounts[r.id] ?? ""}
+                          onChange={(e) =>
+                            setAmounts((a) => ({ ...a, [r.id]: e.target.value }))
+                          }
+                        />
+                        <Button
+                          size="sm"
+                          disabled={busyId === r.id}
+                          onClick={() => resolve(r.id, "APPROVE")}
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyId === r.id}
+                          onClick={() => resolve(r.id, "REJECT")}
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        {r.quantityAssigned > 0
+                          ? `${r.quantityAssigned} assigned`
+                          : "—"}
+                        {r.reviewedBy ? ` · ${r.reviewedBy.fullName}` : ""}
+                      </span>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

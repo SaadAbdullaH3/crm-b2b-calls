@@ -15,6 +15,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PageHeader, EmptyState, ErrorNote, api } from "@/components/admin/admin-ui";
+import { Countdown } from "@/components/countdown";
 
 /**
  * LA-02 / LA-03 — an agent requests more leads.
@@ -27,8 +28,6 @@ import { PageHeader, EmptyState, ErrorNote, api } from "@/components/admin/admin
  * the request row, and the server-side job (Day 4) is what actually assigns —
  * closing this tab does not stop it.
  */
-
-const PRESETS = [15, 30];
 
 interface LeadRequest {
   id: string;
@@ -52,29 +51,9 @@ const STATUS_TONE: Record<string, "default" | "secondary" | "destructive" | "out
   CANCELLED: "secondary",
 };
 
-function Countdown({ target }: { target: string }) {
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  const ms = new Date(target).getTime() - now;
-  if (ms <= 0) return <span className="text-muted-foreground">assigning…</span>;
-
-  const total = Math.floor(ms / 1000);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return (
-    <span className="tabular-nums">
-      {m}:{String(s).padStart(2, "0")}
-    </span>
-  );
-}
-
 export function RequestLeadsClient() {
   const [quantity, setQuantity] = useState<string>("15");
+  const [presets, setPresets] = useState<number[]>([15, 30]);
   const [requests, setRequests] = useState<LeadRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -82,10 +61,13 @@ export function RequestLeadsClient() {
 
   const load = useCallback(async () => {
     try {
-      const data = await api<{ requests: LeadRequest[] }>(
+      const data = await api<{ requests: LeadRequest[]; presetQuantities: number[] }>(
         "/api/leads/requests?scope=mine",
       );
       setRequests(data.requests);
+      // Presets come from assignment.config, so an Admin changing them changes
+      // these buttons rather than only the server-side validation.
+      if (data.presetQuantities?.length) setPresets(data.presetQuantities);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load your requests.");
@@ -133,7 +115,7 @@ export function RequestLeadsClient() {
         <div className="space-y-2">
           <Label>Quantity</Label>
           <div className="flex flex-wrap items-center gap-2">
-            {PRESETS.map((n) => (
+            {presets.map((n) => (
               <Button
                 key={n}
                 type="button"
