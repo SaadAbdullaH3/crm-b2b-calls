@@ -154,6 +154,11 @@ async function fetchCandidates(keys: MatchKeys[]): Promise<CandidateLead[]> {
     return [];
   }
 
+  // ORDER BY is not cosmetic here. Several existing leads can match one row —
+  // two contacts sharing a switchboard number, say — and without a defined
+  // order the merge target would be whatever Postgres happened to return
+  // first, so the same file could merge into a different lead on each run.
+  // Oldest-first makes "the original record" the stable tie-break.
   return prisma.$queryRaw<CandidateLead[]>(Prisma.sql`
     SELECT id, company_name, contact_name, phone_e164, email, website
     FROM leads
@@ -161,7 +166,36 @@ async function fetchCandidates(keys: MatchKeys[]): Promise<CandidateLead[]> {
        OR lower(email) = ANY(${emails})
        OR lower(website) = ANY(${websites})
        OR lower(company_name) = ANY(${companies.length ? companies : [""]})
+    ORDER BY created_at ASC, id ASC
   `);
+}
+
+/**
+ * Picks the BEST match rather than the first one found.
+ *
+ * A row matching an existing lead on phone + email + company + contact must win
+ * over one matching on phone alone. Taking the first match instead sent an
+ * exact five-field match to a one-field match that merely sorted earlier — so
+ * "update the existing lead" updated the wrong lead, silently.
+ *
+ * `candidates` must already be in a deterministic order; ties keep the earlier
+ * entry, which is the oldest lead (or the earliest row, in-file).
+ */
+function bestMatch<T>(
+  rowKeys: MatchKeys,
+  candidates: { ref: T; keys: MatchKeys }[],
+): { ref: T; matched: string[] } | null {
+  let best: { ref: T; matched: string[] } | null = null;
+
+  for (const candidate of candidates) {
+    const matched = matchedFields(rowKeys, candidate.keys);
+    if (matched.length === 0) continue;
+    if (!best || matched.length > best.matched.length) {
+      best = { ref: candidate.ref, matched };
+    }
+  }
+
+  return best;
 }
 
 /**
@@ -300,11 +334,12 @@ export async function analyzeRows({
   const keys = extracted.map(matchKeysFor);
 
   const candidates = await fetchCandidates(keys);
-  const candidateKeys = candidates.map((c) => ({ id: c.id, keys: keysForCandidate(c) }));
+  const candidateKeys = candidates.map((c) => ({ ref: c.id, keys: keysForCandidate(c) }));
 
   // Earlier rows in the same file are also a duplicate source: importing one
-  // sheet twice over shouldn't create two leads.
-  const seen: { rowNumber: number; keys: MatchKeys }[] = [];
+  // sheet twice over shouldn't create two leads. Appended in row order, so
+  // bestMatch's tie-break resolves to the earliest matching row.
+  const seen: { ref: number; keys: MatchKeys }[] = [];
 
   const analyzed: AnalyzedRow[] = [];
   const summary: AnalysisSummary = {
@@ -326,29 +361,21 @@ export async function analyzeRows({
     let duplicateOfRowNumber: number | null = null;
     let duplicateMatchedOn: string[] | null = null;
 
-    for (const candidate of candidateKeys) {
-      const matched = matchedFields(rowKeys, candidate.keys);
-      if (matched.length) {
-        duplicateOfLeadId = candidate.id;
-        duplicateMatchedOn = matched;
-        issues.push("DUPLICATE_OF_EXISTING_LEAD");
-        break;
+    const existingMatch = bestMatch(rowKeys, candidateKeys);
+    if (existingMatch) {
+      duplicateOfLeadId = existingMatch.ref;
+      duplicateMatchedOn = existingMatch.matched;
+      issues.push("DUPLICATE_OF_EXISTING_LEAD");
+    } else {
+      const fileMatch = bestMatch(rowKeys, seen);
+      if (fileMatch) {
+        duplicateOfRowNumber = fileMatch.ref;
+        duplicateMatchedOn = fileMatch.matched;
+        issues.push("DUPLICATE_IN_FILE");
       }
     }
 
-    if (!duplicateOfLeadId) {
-      for (const prev of seen) {
-        const matched = matchedFields(rowKeys, prev.keys);
-        if (matched.length) {
-          duplicateOfRowNumber = prev.rowNumber;
-          duplicateMatchedOn = matched;
-          issues.push("DUPLICATE_IN_FILE");
-          break;
-        }
-      }
-    }
-
-    seen.push({ rowNumber, keys: rowKeys });
+    seen.push({ ref: rowNumber, keys: rowKeys });
 
     const isDuplicate = Boolean(duplicateOfLeadId || duplicateOfRowNumber);
     const status = statusFor(isDuplicate, missingInfo, invalidPhone);

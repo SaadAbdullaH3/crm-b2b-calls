@@ -251,9 +251,14 @@ export function MapperClient({ importId }: { importId: string }) {
             />
           </div>
           <p className="mt-3 text-xs text-muted-foreground">
-            Every row was kept. The review screen where you resolve each duplicate,
-            and the error export, arrive on Day 3.
+            Every row was kept, including the flagged ones.
           </p>
+          <Link
+            href={`/management/imports/${importId}/review`}
+            className="mt-4 inline-block text-sm font-medium underline-offset-4 hover:underline"
+          >
+            Review and import &rarr;
+          </Link>
         </div>
       ) : null}
     </div>

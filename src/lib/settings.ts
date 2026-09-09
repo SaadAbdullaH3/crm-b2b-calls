@@ -45,6 +45,17 @@ export async function getInactivityMs(): Promise<number> {
   return cfg.inactivityMinutes * 60_000;
 }
 
+/**
+ * LA-05. How long a lead request waits for Management before the server-side
+ * job assigns it automatically. Read this rather than hard-coding 5 minutes —
+ * the Day 4 auto-assign sweep and the agent's countdown must agree, and an
+ * Admin can change it.
+ */
+export async function getAutoAssignMs(): Promise<number> {
+  const cfg = await getSetting("assignment.config");
+  return cfg.autoAssignMinutes * 60_000;
+}
+
 /** Upsert a setting. `updatedById` is recorded for the audit trail. */
 export async function setSetting(
   key: SettingKey,
