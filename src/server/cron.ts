@@ -1,4 +1,6 @@
 import cron, { type ScheduledTask } from "node-cron";
+import { runAutoAssignSweep } from "@/server/leads/requests";
+import { runExpiredSessionSweep } from "@/server/leads/sessions";
 
 /**
  * Server-side scheduled jobs, running inside the custom server process.
@@ -18,16 +20,39 @@ import cron, { type ScheduledTask } from "node-cron";
 
 const tasks: ScheduledTask[] = [];
 
-/** Day 4 (Dev A) — LA-05: auto-assign requests older than 5 minutes. */
+/**
+ * LA-05 — auto-assign lead requests that have passed their deadline.
+ *
+ * Runs every minute and selects on `lead_requests.auto_assign_at`, so the
+ * deadline lives in the database rather than in a timer. A request submitted
+ * before a restart is still filled afterwards, and closing the browser changes
+ * nothing — the countdown an agent sees is cosmetic.
+ */
 async function autoAssignSweep() {
-  // Day 4 implementation:
-  //   1. SELECT ... FROM lead_requests
-  //        WHERE status = 'PENDING' AND auto_assign_at <= now()
-  //   2. For each, run the assignment transaction (see the Day 1 Session Log
-  //      entry in .claude/CLAUDE.md for the exact recipe).
-  //   3. Emit EVENTS.REQUEST_RESOLVED with resolvedBy: "SYSTEM".
-  if (process.env.CRON_VERBOSE === "true") {
-    console.log("[cron] auto-assign sweep tick (no-op until Day 4)");
+  const result = await runAutoAssignSweep();
+  if (result.processed > 0) {
+    console.log(
+      `[cron] auto-assigned ${result.assigned} lead(s) across ${result.processed} request(s)`,
+    );
+  } else if (process.env.CRON_VERBOSE === "true") {
+    console.log("[cron] auto-assign sweep tick — nothing due");
+  }
+}
+
+/**
+ * LA-09 — return uncalled leads for agents whose session expired without an
+ * explicit logout.
+ *
+ * The logout route handles the deliberate case. This catches the browser that
+ * was simply closed: without it those leads stay locked to someone who is no
+ * longer signed in, and nobody else can call them.
+ */
+async function expiredSessionSweep() {
+  const result = await runExpiredSessionSweep();
+  if (result.released > 0) {
+    console.log(
+      `[cron] returned ${result.released} uncalled lead(s) from ${result.agents} expired session(s)`,
+    );
   }
 }
 
@@ -62,7 +87,17 @@ export function startCronJobs() {
     }),
   );
 
-  console.log("[cron] registered 2 jobs: lead auto-assign sweep, idle sweep");
+  tasks.push(
+    cron.schedule("* * * * *", () => {
+      void expiredSessionSweep().catch((err) =>
+        console.error("[cron] expired-session sweep failed:", err),
+      );
+    }),
+  );
+
+  console.log(
+    "[cron] registered 3 jobs: lead auto-assign sweep, idle sweep, expired-session lead return",
+  );
 }
 
 export function stopCronJobs() {
