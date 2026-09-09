@@ -109,3 +109,46 @@ If step 2 ever produces a second open row for a lead, Postgres rejects the write
 - **Dev B is NOT rebuilding Day 1.** They clone this repo and run the setup block in GLOBAL.md's Project section. That means the schema, RBAC middleware and Socket.io event contract are now genuinely shared code — a breaking change to any of them is a coordination event, not a local edit. Same rule as before: their 9 framed tables are theirs; `audit_log` / `notifications` / `activity_events` need a heads-up first.
 - Local dev server stopped at end of session; the Postgres container is left running (`restart: unless-stopped`). `docker compose down` if the port is needed.
 - Not built, deliberately: an SRS requirements-traceability doc mapping the ~150 numbered requirements and the 27 acceptance criteria to build days. Nothing in the repo tracks that yet, and Day 10 is a full regression against exactly that list — worth creating before then. Raised with Saad on Day 1; deferred, not forgotten.
+
+### 2026-09-09 — Day 2: Lead Import Engine, part 1 (LM-01/02/04/05)
+
+Branch `deva/day-2-lead-import`. Adopted Dev B's convention: one branch per day, merged to main at end of day.
+
+**Synced with Dev B first**
+- Pulled 8 commits (their Day 2 Admin Config + Day 3 Communication). `npm ci` as they asked — `socket.io-client` moved to runtime deps.
+- `npx prisma migrate dev` applied their 3 migrations. **31 tables before my work, 32 after.** NF-07 index `lead_assignments_one_active_holder` re-verified present after every migration, theirs and mine.
+- Re-seeded for their 2 new permission keys (35 total). Safe here because this database's permission matrix was never customised through AD-02 — their warning about re-seeding still stands generally.
+- Their `notify()` / `NOTIFICATION.*` pipeline is confirmed ready for my Day 4. Import chain is clean of `server-only`, so it is genuinely callable from the auto-assign cron.
+
+**Shipped**
+- `lead_import_rows` table (new, mine): every parsed row stored with a verdict, plus `resolution` for Day 3's LM-06 decisions and `duplicate_of_lead_id` / `duplicate_of_row_number`. **Nothing is ever discarded during analysis** — the row survives with its issues, which is what LM-04 requires and what Day 3's error export reads.
+- `detectedColumns` added to `lead_imports`.
+- `src/lib/import/` — `phone.ts` (libphonenumber-js, U.S. format only), `parse.ts` (exceljs), `target-fields.ts` (mapping targets + header auto-suggestion), `load-targets.ts`, `analyze.ts` (validation + duplicate detection).
+- API: `POST/GET /api/leads/imports`, `GET /api/leads/imports/[id]`, `POST /api/leads/imports/[id]/mapping`.
+- UI: `/management/imports` (upload + history) and `/management/imports/[id]` (column mapper), reusing Dev B's `PageHeader`/`NativeSelect`/`EmptyState`/`ErrorNote`/`api` helpers.
+- `scripts/make-import-fixture.mjs` — generates a messy 11-row .xlsx covering every validation branch. Day 3 will want it.
+
+**Design decisions**
+1. **The AD-05 contract is the TABLE, not the HTTP route.** `GET /api/admin/fields` requires `admin.fields.manage`, which Management does not hold — and Management is who runs imports. So `load-targets.ts` reads `lead_field_definitions` through Prisma directly. Same contract (the field `key`), no permission mismatch, no self-HTTP hop. Flagged to Dev B in GLOBAL.md.
+2. **Duplicate matching splits person-level from organisation-level identifiers.** Phone and email are strong (either alone = duplicate). Company name and website are organisation-level and only count *paired with a matching contact name*. Found this the hard way: with website treated as strong, "Karen Fields at Acme" was flagged as a duplicate of "John Smith at Acme" purely because they share a company website — which would suppress exactly the multi-contact-per-company leads the client is paying to call. Contact name alone is also insufficient (every "John Smith").
+3. **Unmapped required field = import-level warning, not a per-row flag.** Flagging all 5,000 rows because a required custom field wasn't mapped makes the import look broken. The mapper warns at mapping time instead. A mapped-but-blank required field *does* flag its row.
+4. **Analysis re-reads the stored .xlsx** rather than trusting row data from the browser. The client only ever sends the mapping.
+5. Re-mapping deletes and rebuilds that import's rows — a stale verdict from a previous mapping would corrupt Day 3's counts.
+
+**Verified end to end** (11-row fixture, per-row verdicts checked in psql)
+- Auto-suggestion mapped all 7 messy headers correctly.
+- Phone duplicate detected across formatting: `(415) 555-0132` ≡ `+1 415 555 0132`.
+- Company duplicate across legal suffix: `Globex, Inc.` ≡ `Globex Inc`.
+- Different contact at same company → correctly NOT a duplicate.
+- Numeric Excel phone cell (`3125550142`) parsed; UK `+44` rejected as non-U.S.; trailing blank rows excluded from the count.
+- Duplicate against an **existing DB lead** confirmed separately (`duplicate_of_lead_id` set, matched on all 5 fields).
+- Admin-created dynamic field appeared as a mapping target and its required-blank row was flagged.
+- RBAC: agent 403 on upload and on history; unauthenticated 401; agent 307 → /403 on the page.
+- **Zero rows written to `leads`** — correct, that is Day 3.
+- Error paths: non-.xlsx, corrupt .xlsx, field mapped twice, unknown target — all 400 with usable messages.
+
+**Bug found and fixed in shared code:** `<Toaster />` was never mounted, so every `toast()` call in the app — including all six of Dev B's Day 2 Admin screens — was a silent no-op. Added to `src/app/(app)/layout.tsx` (my Day 1 file). Told Dev B.
+
+**Known issue, not mine to fix alone:** `npx eslint src` reports 13 errors — 11 pre-existing in Dev B's client components (`react-hooks/set-state-in-effect` on the standard `useEffect(() => { void load() })` loader, plus a ref-during-render in `use-socket.ts`), and 2 in my two new client components which follow the same house pattern. `next build` and `tsc --noEmit` are both clean. Fixing only mine would make two files diverge from nine siblings, so this is logged in GLOBAL.md as a shared cleanup for Day 9's NFR pass.
+
+**Next session — Day 3:** finish the import engine (LM-03 validation summary screen, LM-06 per-duplicate resolution, LM-07 error export, LM-08 source tagging, LM-09 import history) and start the Lead Assignment Engine request UI (LA-02/03). The `lead_import_rows` verdicts and `resolution` column are already in place for all of it. Coordinate the `request:submitted` event shape with Dev B — it is already defined in `src/lib/realtime/events.ts`.

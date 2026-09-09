@@ -88,6 +88,30 @@ enum ImportStatus {
   FAILED
 }
 
+/// Verdict for one parsed row of an import file (LM-03/LM-04/LM-05).
+enum ImportRowStatus {
+  /// Clean: no duplicate, no missing information, phone format valid.
+  READY
+  /// Matches a lead already in the database, or an earlier row in this file.
+  DUPLICATE
+  /// A required-ish field is blank. The row is kept, not discarded.
+  MISSING_INFO
+  /// Phone number failed the U.S. FORMAT check (LM-05). Format only — we never
+  /// check whether the number is live or reachable.
+  INVALID_PHONE
+  /// More than one of the above.
+  INVALID
+}
+
+/// Management's decision for a detected duplicate (LM-06, actioned on Day 3).
+enum DuplicateResolution {
+  PENDING
+  REJECT
+  KEEP_BOTH
+  UPDATE_EXISTING
+  MANUAL_REVIEW
+}
+
 enum CallbackStatus {
   SCHEDULED
   COMPLETED
@@ -260,6 +284,8 @@ model LeadImport {
   uploadedById     String       @map("uploaded_by_id")
   sourceLabel      String?      @map("source_label")
   status           ImportStatus @default(UPLOADED)
+  /// Header names read from the uploaded sheet, in column order (LM-02).
+  detectedColumns  Json?        @map("detected_columns")
   /// Detected-column -> CRM-field map chosen by Management (LM-02).
   columnMapping    Json?        @map("column_mapping")
   totalRows        Int          @default(0) @map("total_rows")
@@ -274,13 +300,62 @@ model LeadImport {
   createdAt        DateTime     @default(now()) @map("created_at")
   updatedAt        DateTime     @updatedAt @map("updated_at")
 
-  uploadedBy User   @relation(fields: [uploadedById], references: [id])
+  uploadedBy User            @relation(fields: [uploadedById], references: [id])
   leads      Lead[]
+  rows       LeadImportRow[]
 
   @@index([uploadedById])
   @@index([status])
   @@index([createdAt])
   @@map("lead_imports")
+}
+
+/// One parsed row of an uploaded sheet, with its validation verdict.
+///
+/// Rows are NEVER discarded during analysis (LM-04): a row with problems is
+/// stored and flagged so Management can see it, decide per-duplicate on Day 3
+/// (LM-06 reject / keep both / update existing / manual review), and export the
+/// error report. Only rows that survive that review become `leads`.
+model LeadImportRow {
+  id        String @id @default(cuid())
+  importId  String @map("import_id")
+  /// 1-based position in the sheet, excluding the header row, so the number
+  /// shown to Management matches what they see in Excel.
+  rowNumber Int    @map("row_number")
+
+  /// Mapped values keyed by CRM field name. Fixed `leads` columns use their
+  /// Prisma field name; Admin-defined dynamic fields use their `key` and end up
+  /// in `leads.custom_fields`.
+  data Json
+
+  status ImportRowStatus @default(READY)
+  /// Machine-readable issue codes (e.g. ["MISSING_PHONE","INVALID_PHONE_FORMAT"]),
+  /// so the Day 3 error export can render a reason per row without re-analysing.
+  issues Json?
+
+  /// Set when this row matches a lead already in the database.
+  duplicateOfLeadId String? @map("duplicate_of_lead_id")
+  /// Set when this row duplicates an EARLIER row in the same file.
+  duplicateOfRowNumber Int? @map("duplicate_of_row_number")
+  /// Which fields matched, e.g. ["phoneE164","email"] — shown to Management so
+  /// they can judge whether it is really the same company.
+  duplicateMatchedOn Json? @map("duplicate_matched_on")
+
+  /// Management's per-duplicate decision (LM-06). Day 3 sets this.
+  resolution DuplicateResolution @default(PENDING)
+  /// The lead this row produced, once the import is committed.
+  importedLeadId String? @map("imported_lead_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  import          LeadImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  duplicateOfLead Lead?      @relation("ImportRowDuplicateOf", fields: [duplicateOfLeadId], references: [id], onDelete: SetNull)
+  importedLead    Lead?      @relation("ImportRowImported", fields: [importedLeadId], references: [id], onDelete: SetNull)
+
+  @@unique([importId, rowNumber])
+  @@index([importId, status])
+  @@index([duplicateOfLeadId])
+  @@map("lead_import_rows")
 }
 
 model Lead {
@@ -336,6 +411,9 @@ model Lead {
   assignments LeadAssignment[] @relation("LeadAssignmentHistory")
   calls       Call[]
   callbacks   Callback[]
+
+  importRowsDuplicateOf LeadImportRow[] @relation("ImportRowDuplicateOf")
+  importRowsImported    LeadImportRow[] @relation("ImportRowImported")
 
   @@index([status, assignedToId])
   @@index([assignedToId])
