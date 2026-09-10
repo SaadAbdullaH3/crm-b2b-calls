@@ -407,3 +407,43 @@ Scope Watch. CRM screen time + idle detection is built and needs no desktop inst
 
 **Next — Day 5: HR Module.** `work_sessions` now exists, so HR-04's attendance view has real data
 to read.
+
+**Day 4 addendum — Sourcery review fixes (4 of 5 accepted)**
+
+1. **Stale-ACTIVE + `hadActivity:true` booked the whole gap as active — REAL, fixed.** Only the
+   no-activity path checked staleness. If the window had already elapsed and input arrived before
+   the sweep caught it (server restart, machine resumed from sleep), the entire gap accrued as
+   ACTIVE — exactly the "reward idling in four-minute increments" failure this module exists to
+   prevent. Both paths now share one `splitStaleInterval()`. **Reproduced:** marker −10 min,
+   activity −8 min → **120s active / 480s idle**, where the old code gave 600s active.
+2. **Read-then-increment race between heartbeats and the sweep — REAL, fixed.** The counters were
+   atomic increments, but the delta was computed from a stale snapshot and `lastHeartbeatAt` /
+   `state` were last-write-wins, so an overlap double-counted and could clobber a transition. Every
+   mutation now runs inside `withLockedSession()` (`SELECT … FOR UPDATE`, same idiom as Dev A's
+   assignment transaction). **Reproduced:** 10 concurrent heartbeats against a 60s-old marker →
+   **60s accrued once**, not up to 600s.
+3. **Concurrent `startBreak` — REAL, fixed.** State was checked before the transaction, so two
+   requests could both open a break period; `endBreak` closes only the newest, orphaning the other
+   forever. The check now happens under the lock. **Reproduced:** 8 concurrent starts → 1 success,
+   7×409, exactly one break row, `break_count` 1.
+4. **Expiry sweep closed at sweep time, not termination time — REAL, fixed.** Time between an auth
+   session actually dying and the next cron tick accrued as idle, and an open break's duration was
+   inflated to match. A minute in normal running — but a whole night after an outage, which would
+   wreck a punctuality report. `endWorkSession()` now takes an `endAt`, and the sweep passes
+   `revokedAt`/`expiresAt`. **While fixing this I found a gap in my own fix:** pass 1 (idle) didn't
+   exclude already-dead sessions, so it pushed the marker past the termination time and defeated
+   the cap. Pass 1 now skips them. **Reproduced:** marker −20 min, expired −10 min → `ended_at`
+   exactly equals `expires_at` (delta 0) and **600s accrued, not 1200s**.
+5. **INTEGER overflow on the ms counters — NOT ACCEPTED as written.** Real arithmetic (INTEGER caps
+   at 24.86 days) but unreachable: a work session is 1:1 with an auth session, and
+   `SESSION_TTL_HOURS` is 8, so one bucket holds at most ~28.8M ms against a 2.1B limit. Reaching
+   it needs a 600-hour TTL. Migrating to `BigInt` would also have rippled into JSON serialization
+   (`BigInt` does not `JSON.stringify`) across the engine and the live route — real breakage risk
+   for an unreachable bug. **The underlying danger is a bogus delta, not a long shift**, and BigInt
+   would only have raised the ceiling on the garbage. Added `MAX_ACCRUAL_MS` (24h) instead: any
+   single accrual beyond that is clamped and logged, which catches clock jumps, hibernation and
+   multi-day outages — and incidentally makes overflow impossible.
+
+Regression after all four: break lifecycle, heartbeat-during-break, TM-05 at both layers, agent
+payload still metric-free, logout close. `tsc` + build clean, dev log free of errors and clamp
+warnings.
