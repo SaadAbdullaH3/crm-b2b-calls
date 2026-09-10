@@ -25,8 +25,8 @@ export const GET = requirePermission("dashboard.management", async (req, { user 
 
   const [leads, sources, agents, outcomes, pendingRequests, unreadCounts] =
     await Promise.all([
-      getLeadTotals(),
-      getSourcePerformance(),
+      getLeadTotals(range),
+      getSourcePerformance(range),
       getAgentPerformance(range, canSeeMonitoring),
       getOutcomeMix(range),
       prisma.leadRequest.count({ where: { status: "PENDING" } }),

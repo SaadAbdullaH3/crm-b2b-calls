@@ -43,61 +43,101 @@ export function resolveRange(scope: string): DateRange {
 
 // --- lead pipeline (SRS §8.1 line 1) ----------------------------------------
 
+/**
+ * Lead figures, split into two groups that answer genuinely different
+ * questions — because presenting them as one block under a single scope
+ * selector is misleading.
+ *
+ * `pipeline` is CURRENT STATE: how many leads sit available or assigned right
+ * now. Date-filtering it would be meaningless — "leads available today" is not
+ * a thing anyone wants; a lead imported last month and still uncalled is
+ * available now.
+ *
+ * `inRange` is ACTIVITY: what was imported and worked inside the selected
+ * window. These move when the scope changes; the pipeline numbers do not, and
+ * the UI labels each group accordingly.
+ */
 export interface LeadTotals {
-  total: number;
-  available: number;
-  assigned: number;
-  called: number;
-  remaining: number;
-  doNotCall: number;
-  qualified: number;
-  byStatus: { status: LeadStatus; count: number }[];
+  pipeline: {
+    total: number;
+    available: number;
+    assigned: number;
+    doNotCall: number;
+    byStatus: { status: LeadStatus; count: number }[];
+  };
+  inRange: {
+    imported: number;
+    worked: number;
+    qualified: number;
+  };
 }
 
-export async function getLeadTotals(): Promise<LeadTotals> {
-  const [byStatus, total, called, doNotCall] = await Promise.all([
+export async function getLeadTotals(range: DateRange): Promise<LeadTotals> {
+  const [byStatus, total, doNotCall, imported, worked, qualified] = await Promise.all([
     prisma.lead.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.lead.count(),
-    // "Called" means a disposition was recorded, not that a call row exists —
-    // a dialled-and-abandoned attempt is not a worked lead.
-    prisma.lead.count({ where: { lastDispositionCode: { not: null } } }),
     prisma.lead.count({ where: { doNotCall: true } }),
+
+    prisma.lead.count({ where: { createdAt: { gte: range.from, lte: range.to } } }),
+
+    // "Worked" means a disposition was recorded, not that a call row exists —
+    // a dialled-and-abandoned attempt is not a worked lead. Day 7's reports
+    // must use the same definition or the two screens will disagree.
+    prisma.lead.count({
+      where: { lastDispositionAt: { gte: range.from, lte: range.to } },
+    }),
+    prisma.lead.count({
+      where: {
+        lastDispositionCode: "QUALIFIED",
+        lastDispositionAt: { gte: range.from, lte: range.to },
+      },
+    }),
   ]);
 
   const counts = new Map(byStatus.map((s) => [s.status, s._count._all]));
   const get = (s: LeadStatus) => counts.get(s) ?? 0;
 
   return {
-    total,
-    available: get(LeadStatus.AVAILABLE),
-    assigned:
-      get(LeadStatus.ASSIGNED) +
-      get(LeadStatus.IN_PROGRESS) +
-      get(LeadStatus.CALLBACK_SCHEDULED),
-    called,
-    // What is left to work: available now, plus assigned but never dispositioned.
-    remaining: get(LeadStatus.AVAILABLE),
-    doNotCall,
-    qualified: get(LeadStatus.CLOSED_QUALIFIED),
-    byStatus: byStatus.map((s) => ({ status: s.status, count: s._count._all })),
+    pipeline: {
+      total,
+      available: get(LeadStatus.AVAILABLE),
+      assigned:
+        get(LeadStatus.ASSIGNED) +
+        get(LeadStatus.IN_PROGRESS) +
+        get(LeadStatus.CALLBACK_SCHEDULED),
+      doNotCall,
+      byStatus: byStatus.map((s) => ({ status: s.status, count: s._count._all })),
+    },
+    inRange: { imported, worked, qualified },
   };
 }
 
 // --- per-source performance (SRS §8.1 line 2, LM-08) ------------------------
 
+/**
+ * `imported` is the source's whole book — every lead it has ever produced,
+ * because "how big is this list" does not change with a date filter.
+ * `worked` / `qualified` / `notInterested` are ACTIVITY and respect the
+ * selected range. The column headers say which is which; presenting a
+ * cumulative figure beside a scoped one without labelling them is how a
+ * dashboard quietly lies.
+ */
 export interface SourceRow {
   source: string;
+  /** All-time: every lead from this source. */
   imported: number;
-  called: number;
+  /** Within the selected range. */
+  worked: number;
   qualified: number;
   notInterested: number;
+  /** All-time: DNC is a permanent property of the lead, not an event. */
   doNotCall: number;
-  /** Qualified as a share of CALLED, not of imported — a source with 900
+  /** Qualified as a share of WORKED, not of imported — a source with 900
    *  uncalled leads is not performing badly, it is untouched. */
   conversionPct: number | null;
 }
 
-export async function getSourcePerformance(): Promise<SourceRow[]> {
+export async function getSourcePerformance(range: DateRange): Promise<SourceRow[]> {
   const rows = await prisma.$queryRaw<
     {
       source: string | null;
@@ -110,27 +150,35 @@ export async function getSourcePerformance(): Promise<SourceRow[]> {
   >`
     SELECT
       COALESCE(source_label, '(no source)') AS source,
-      COUNT(*)                                                          AS imported,
-      COUNT(*) FILTER (WHERE last_disposition_code IS NOT NULL)         AS called,
-      COUNT(*) FILTER (WHERE last_disposition_code = 'QUALIFIED')       AS qualified,
-      COUNT(*) FILTER (WHERE last_disposition_code = 'NOT_INTERESTED')  AS not_interested,
-      COUNT(*) FILTER (WHERE do_not_call)                               AS do_not_call
+      COUNT(*) AS imported,
+      COUNT(*) FILTER (
+        WHERE last_disposition_at BETWEEN ${range.from} AND ${range.to}
+      ) AS called,
+      COUNT(*) FILTER (
+        WHERE last_disposition_code = 'QUALIFIED'
+          AND last_disposition_at BETWEEN ${range.from} AND ${range.to}
+      ) AS qualified,
+      COUNT(*) FILTER (
+        WHERE last_disposition_code = 'NOT_INTERESTED'
+          AND last_disposition_at BETWEEN ${range.from} AND ${range.to}
+      ) AS not_interested,
+      COUNT(*) FILTER (WHERE do_not_call) AS do_not_call
     FROM leads
     GROUP BY 1
     ORDER BY imported DESC
   `;
 
   return rows.map((r) => {
-    const called = Number(r.called);
+    const worked = Number(r.called);
     const qualified = Number(r.qualified);
     return {
       source: r.source ?? "(no source)",
       imported: Number(r.imported),
-      called,
+      worked,
       qualified,
       notInterested: Number(r.not_interested),
       doNotCall: Number(r.do_not_call),
-      conversionPct: called > 0 ? Math.round((qualified / called) * 100) : null,
+      conversionPct: worked > 0 ? Math.round((qualified / worked) * 100) : null,
     };
   });
 }
@@ -323,10 +371,14 @@ export async function getAgentPerformance(
 // --- overall call outcome mix -----------------------------------------------
 
 export async function getOutcomeMix(range: DateRange) {
-  const rows = await prisma.$queryRaw<{ code: DispositionCode; n: bigint }[]>`
+  // LEFT JOIN, not INNER. An inner join silently drops calls with no
+  // disposition yet, so the buckets would sum to less than `totalCalls` and
+  // the panel would not add up — a dialled-and-abandoned attempt is still a
+  // call. Those land in `undispositioned` instead of vanishing.
+  const rows = await prisma.$queryRaw<{ code: DispositionCode | null; n: bigint }[]>`
     SELECT d.code, COUNT(*) AS n
     FROM calls c
-    JOIN dispositions d ON d.id = c.disposition_id
+    LEFT JOIN dispositions d ON d.id = c.disposition_id
     WHERE c.created_at BETWEEN ${range.from} AND ${range.to}
     GROUP BY 1
   `;
@@ -337,9 +389,17 @@ export async function getOutcomeMix(range: DateRange) {
     _sum: { durationSec: true },
   });
 
+  const byCode = rows
+    .filter((r) => r.code !== null)
+    .map((r) => ({ code: r.code as DispositionCode, count: Number(r.n) }));
+
+  const undispositioned = Number(rows.find((r) => r.code === null)?.n ?? 0);
+
   return {
     totalCalls: totals._count._all,
     totalTalkSec: totals._sum.durationSec ?? 0,
-    byCode: rows.map((r) => ({ code: r.code, count: Number(r.n) })),
+    byCode,
+    /** Calls with no outcome recorded. byCode + this === totalCalls. */
+    undispositioned,
   };
 }

@@ -116,9 +116,12 @@ export const GET = requirePermission("dashboard.management", async (req, { user,
           startedAt: true,
           endedAt: true,
           state: true,
-          idleCount: true,
-          breakCount: true,
-          // Same TM-05 gate as everywhere else.
+          // TM-05 gate. `idleCount` and `breakCount` belong INSIDE it: "went
+          // idle 40 times today" is a monitoring measurement, not an
+          // attendance fact, and leaving them above this line was how they
+          // escaped it in the first place.
+          idleCount: canSeeMonitoring,
+          breakCount: canSeeMonitoring,
           activeMs: canSeeMonitoring,
           idleMs: canSeeMonitoring,
           breakMs: canSeeMonitoring,
@@ -145,16 +148,21 @@ export const GET = requirePermission("dashboard.management", async (req, { user,
 
   // Attendance for the range, derived from work sessions — the same source
   // HR-04 reads, so the two screens can never disagree.
-  const attendance = sessions
-    .filter((s) => s.state !== undefined)
-    .map((s) => ({
-      date: s.startedAt.toISOString().slice(0, 10),
-      startedAt: s.startedAt,
-      endedAt: s.endedAt,
-      stillIn: s.state !== WorkSessionState.ENDED,
-      idleCount: s.idleCount,
-      breakCount: s.breakCount,
-    }));
+  //
+  // Attendance is login / logout / still-in — facts about whether someone
+  // turned up, which `dashboard.management` is enough to see. The idle and
+  // break COUNTS are spread in only for a monitoring.view holder: they are
+  // derived from the Monitoring Engine and TM-05 reserves that class of
+  // measurement for Management, not for anyone who can open this page.
+  const attendance = sessions.map((s) => ({
+    date: s.startedAt.toISOString().slice(0, 10),
+    startedAt: s.startedAt,
+    endedAt: s.endedAt,
+    stillIn: s.state !== WorkSessionState.ENDED,
+    ...(canSeeMonitoring
+      ? { idleCount: s.idleCount, breakCount: s.breakCount }
+      : {}),
+  }));
 
   return ok({
     agent,

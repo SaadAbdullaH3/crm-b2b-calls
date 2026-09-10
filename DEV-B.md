@@ -584,3 +584,44 @@ modal writes `disposition_id` and `duration_sec` the way the fixture does is cur
 
 **Next — Day 7: Reporting Engine frontend.** Agree the aggregation function signatures with Dev A
 EARLY; he builds the backend half the same day. Much of `metrics.ts` is reusable.
+
+**Day 6 addendum — Sourcery review fixes (all 5 accepted)**
+
+1. **TM-05 LEAK in the drill-down — REAL, fixed, and it contradicted a claim I made.** The
+   `select` gated `activeMs`/`idleMs`/`breakMs` on `canSeeMonitoring` but `idleCount` and
+   `breakCount` sat one line ABOVE the gate, so a `dashboard.management` holder without
+   `monitoring.view` still received "went idle 40 times today" — a monitoring measurement, not an
+   attendance fact. My Day 6 AD-02 proof only exercised the *dashboard* route, not the drill-down.
+   **Verified after fixing:** attendance rows drop to `date/startedAt/endedAt/stillIn` and zero
+   monitoring keys survive anywhere in the payload, while calls and leads keep working.
+2. **Outcome buckets did not reconcile — REAL, fixed.** `totalCalls` counted every call while
+   `byCode` INNER JOINed `dispositions`, so an undispositioned call inflated the total without
+   appearing in any bucket. Now a LEFT JOIN with an explicit `undispositioned` count, surfaced in
+   the UI whenever non-zero. **Verified** by injecting an abandoned call: 56 + 1 = 57. My fixture
+   always set a disposition, which is exactly why I never saw it — but Dev A's Day 5 modal may
+   well create the call row before the outcome.
+3. **Scope applied to calls but not to leads or sources — REAL, fixed.** "Today" showed today's
+   calls beside all-time lead totals, so "Total leads 120" read as "120 arrived today". Split
+   `getLeadTotals` into `pipeline` (current state — date-filtering "available leads" is
+   meaningless) and `inRange` (imported/worked/qualified), with the UI labelling each group and
+   naming the scope. Source `imported` stays the source's whole book; worked/qualified now respect
+   the range, and the column note says so. **Verified:** pipeline constant across scopes,
+   `imported` moves 24 (today) → 120 (all).
+4. **Fixture was non-deterministic — REAL, fixed.** Documented totals were dice rolls. Now a
+   seeded mulberry32 with every `Math.random()` routed through it, plus an assertion that fails
+   loudly on drift. Dev A learned this on Day 4: *a flaky correctness test is worse than none*.
+5. **Fixture was not idempotent — REAL, fixed.** Every run added another 120 leads. **Found the
+   evidence live: the database already held 240 leads and 103 calls** from two runs, which means
+   the Day 6 figures I reported were computed over doubled data. Leads are now tagged
+   `[fixture]`, a re-run deletes the previous set first, and the calls loop is scoped to fixture
+   leads so it can never dial real imported data. **Verified:** two consecutive runs both end at
+   120 leads / 56 calls / 12 callbacks, not 240.
+
+**Corrected fixture totals: 120 leads, 78 assigned, 56 calls, 12 callbacks** (the earlier
+"55 calls, 13 callbacks" came from unseeded runs over accumulated data). These are now constants
+asserted by the script itself.
+
+**Also worth recording:** the dashboard client hand-declares its own `Payload` interface, so
+changing the server response shape did NOT fail typecheck — the UI would have broken silently at
+runtime. Reusing the exported server types (or generating them) would close that gap; logged for
+the Day 9 NFR pass rather than reshaping four screens today.

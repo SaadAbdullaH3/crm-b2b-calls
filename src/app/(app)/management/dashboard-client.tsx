@@ -50,24 +50,30 @@ interface Payload {
   scope: string;
   canSeeMonitoring: boolean;
   leads: {
-    total: number;
-    available: number;
-    assigned: number;
-    called: number;
-    doNotCall: number;
-    qualified: number;
+    pipeline: {
+      total: number;
+      available: number;
+      assigned: number;
+      doNotCall: number;
+    };
+    inRange: { imported: number; worked: number; qualified: number };
   };
   sources: {
     source: string;
     imported: number;
-    called: number;
+    worked: number;
     qualified: number;
     notInterested: number;
     doNotCall: number;
     conversionPct: number | null;
   }[];
   agents: AgentRow[];
-  outcomes: { totalCalls: number; totalTalkSec: number; byCode: { code: string; count: number }[] };
+  outcomes: {
+    totalCalls: number;
+    totalTalkSec: number;
+    byCode: { code: string; count: number }[];
+    undispositioned: number;
+  };
   pendingRequests: number;
   generatedAt: string;
 }
@@ -132,7 +138,11 @@ export function DashboardClient() {
   if (!data) return <ErrorNote message={error} />;
 
   const { leads, outcomes } = data;
-  const worked = leads.total > 0 ? Math.round((leads.called / leads.total) * 100) : 0;
+  const { pipeline, inRange } = leads;
+  const scopeLabel =
+    { today: "today", "7d": "last 7 days", "30d": "last 30 days", all: "all time" }[
+      data.scope
+    ] ?? data.scope;
 
   return (
     <>
@@ -165,20 +175,43 @@ export function DashboardClient() {
       <ErrorNote message={error} />
 
       {/* --- lead pipeline --------------------------------------------- */}
-      <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+      {/* Two groups, labelled. Pipeline is where leads stand RIGHT NOW and does
+          not move with the scope selector; activity does. Showing them as one
+          undifferentiated block invited "total leads 120" to be read as
+          "120 arrived today". */}
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Pipeline now
+      </p>
+      <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          { label: "Total leads", value: leads.total },
-          { label: "Available", value: leads.available },
-          { label: "Assigned", value: leads.assigned },
-          { label: "Worked", value: leads.called, sub: `${worked}% of total` },
-          { label: "Qualified", value: leads.qualified },
-          { label: "Do not call", value: leads.doNotCall },
+          { label: "Total leads", value: pipeline.total },
+          { label: "Available", value: pipeline.available },
+          { label: "Assigned", value: pipeline.assigned },
+          { label: "Do not call", value: pipeline.doNotCall },
         ].map((t) => (
           <Card key={t.label}>
             <CardContent className="pt-5">
               <p className="text-xs text-muted-foreground">{t.label}</p>
               <p className="text-2xl font-semibold tabular-nums">{t.value}</p>
-              {t.sub ? <p className="text-[10px] text-muted-foreground">{t.sub}</p> : null}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Activity — {scopeLabel}
+      </p>
+      <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {[
+          { label: "Imported", value: inRange.imported },
+          { label: "Worked", value: inRange.worked },
+          { label: "Qualified", value: inRange.qualified },
+          { label: "Calls", value: outcomes.totalCalls },
+        ].map((t) => (
+          <Card key={t.label}>
+            <CardContent className="pt-5">
+              <p className="text-xs text-muted-foreground">{t.label}</p>
+              <p className="text-2xl font-semibold tabular-nums">{t.value}</p>
             </CardContent>
           </Card>
         ))}
@@ -207,6 +240,17 @@ export function DashboardClient() {
                 <p className="text-lg font-semibold tabular-nums">{o.count}</p>
               </div>
             ))}
+            {/* Shown only when non-zero, but it MUST be shown when it is:
+                otherwise the buckets sum to less than the call total and the
+                panel silently fails to add up. */}
+            {outcomes.undispositioned > 0 ? (
+              <div>
+                <p className="text-xs text-muted-foreground">No outcome yet</p>
+                <p className="text-lg font-semibold tabular-nums">
+                  {outcomes.undispositioned}
+                </p>
+              </div>
+            ) : null}
           </div>
         )}
       </div>
@@ -290,8 +334,11 @@ export function DashboardClient() {
       {/* --- source performance ---------------------------------------- */}
       <h2 className="mb-2 text-base font-semibold">By lead source</h2>
       <p className="mb-3 text-xs text-muted-foreground">
-        Conversion is qualified ÷ called, not ÷ imported — a source with a large untouched
-        backlog is not performing badly, it is unworked.
+        <strong>Imported</strong> is each source&apos;s whole book, all time.{" "}
+        <strong>Worked</strong>, <strong>Qualified</strong> and{" "}
+        <strong>Not interested</strong> cover {scopeLabel} only. Conversion is qualified ÷
+        worked, not ÷ imported — a source with a large untouched backlog is unworked, not
+        underperforming.
       </p>
 
       {data.sources.length === 0 ? (
@@ -303,7 +350,7 @@ export function DashboardClient() {
               <TableRow>
                 <TableHead>Source</TableHead>
                 <TableHead className="text-right">Imported</TableHead>
-                <TableHead className="text-right">Called</TableHead>
+                <TableHead className="text-right">Worked</TableHead>
                 <TableHead className="text-right">Qualified</TableHead>
                 <TableHead className="text-right">Not interested</TableHead>
                 <TableHead className="text-right">DNC</TableHead>
@@ -315,7 +362,7 @@ export function DashboardClient() {
                 <TableRow key={s.source}>
                   <TableCell className="font-medium">{s.source}</TableCell>
                   <TableCell className="text-right tabular-nums">{s.imported}</TableCell>
-                  <TableCell className="text-right tabular-nums">{s.called}</TableCell>
+                  <TableCell className="text-right tabular-nums">{s.worked}</TableCell>
                   <TableCell className="text-right tabular-nums">{s.qualified}</TableCell>
                   <TableCell className="text-right tabular-nums">{s.notInterested}</TableCell>
                   <TableCell className="text-right tabular-nums">{s.doNotCall}</TableCell>
