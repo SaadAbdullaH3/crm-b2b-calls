@@ -3,6 +3,8 @@ import { NAV } from "@/lib/nav";
 import type { SessionUser } from "@/lib/auth/session";
 import { LogoutButton } from "@/components/logout-button";
 import { NotificationBell } from "@/components/notification-bell";
+import { Heartbeat } from "@/components/monitoring/heartbeat";
+import { BreakControl } from "@/components/monitoring/break-control";
 
 /**
  * Shared chrome for every signed-in section. The nav is driven entirely by
@@ -44,6 +46,12 @@ export function AppShell({
         </nav>
 
         <div className="border-t p-3">
+          {/* TM-04 — every role can take a break; TM-05 keeps the metrics off
+              this screen. See break-control.tsx for what is deliberately not
+              rendered here. */}
+          <div className="pb-3">
+            <BreakControl />
+          </div>
           <p className="px-2 pb-2 text-xs font-medium">{user.fullName}</p>
           <p className="px-2 pb-3 text-xs text-muted-foreground">{user.email}</p>
           <LogoutButton />
@@ -51,6 +59,9 @@ export function AppShell({
       </aside>
 
       <main className="flex-1 overflow-x-auto p-8">{children}</main>
+
+      {/* TM-01/TM-03 — renders nothing; reports tab-open + real-input signals. */}
+      <Heartbeat />
     </div>
   );
 }

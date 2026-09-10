@@ -329,3 +329,121 @@ cron body Dev A stubbed on Day 1; read the threshold from `monitoring.config` vi
    non-empty table also **fails loudly** in Postgres rather than corrupting silently, so the failure
    mode described cannot occur. Backfill SQL for provably-empty tables would be dead code.
    Documented here so it isn't re-raised.
+
+### 2026-09-10 — Day 4: Monitoring Engine (TM-01, TM-03, TM-04, TM-06)
+
+Branch `devb/day-4-monitoring`. Pulled Dev A's Days 2–4 first (he is caught up and merged);
+`npm ci` for his `exceljs` + `libphonenumber-js`; his `lead_import_rows` migration applied.
+**34 tables.** Both hand-written indexes re-verified after migrating:
+`lead_assignments_one_active_holder` and `conversations_pair_key_key`.
+
+**The model, in one paragraph.** Each signed-in auth session gets one `work_sessions` row holding
+three counters — active / idle / break — plus a marker (`lastHeartbeatAt`) meaning "everything
+before this is already counted". Any event that could change the picture first *accrues* the
+interval since the marker into the bucket the current state names, then moves the marker and
+applies the transition. Time is never double-counted or lost, and a month of monitoring is a few
+hundred rows instead of millions of heartbeats — a report reads counters, not an event replay.
+
+**Shipped**
+- Schema: `work_sessions` (1:1 with Dev A's `sessions`) + `break_periods`, `WorkSessionState`
+  enum. Keyed to the auth session, not the user, because that already has a definite start and
+  end — and it is the same lifecycle Dev A's lead-return rules hang off.
+- `src/server/monitoring/engine.ts` — accrual, idle transition, breaks, session close,
+  `runIdleSweep()`. No `server-only` in the import chain, so cron can call it.
+- **Filled in the idle-sweep cron body Dev A stubbed on Day 1.** Two passes: stale ACTIVE →
+  IDLE, and open work sessions whose auth session is revoked/expired → ENDED.
+- Login/logout hooked: `startWorkSession()` / `endWorkSession()`.
+- `getCurrentSessionId()` added to `src/lib/auth/session.ts` — read-only and additive. Monitoring
+  measures per SESSION (two machines = two work sessions), and `SessionUser` carries no session id.
+- Routes: `/api/monitoring/heartbeat`, `/break`, `/me` (agent-safe), `/live` (Management).
+- UI: `<Heartbeat />` + `<BreakControl />` in the app shell, `/management/monitoring`.
+
+**Decisions**
+1. **Active time stops at the last activity, not when the sweep notices.** "No activity for 5
+   minutes → Active Time stops" — those five minutes were, in hindsight, not worked. Counting
+   them active would reward idling in 4-minute increments. `transitionToIdle` splits the interval
+   at `lastActivityAt`.
+2. **A heartbeat and an activity signal are different things.** A beat proves the tab is open; a
+   locked screen beats forever. Only real input moves `lastActivityAt`, and only that prevents idle.
+3. **A heartbeat during a break does NOT end the break.** Otherwise brushing the trackpad past a
+   laptop silently ends someone's lunch. Breaks end deliberately.
+4. **Heartbeat and break routes are `requireAuth`, self-scoped — never `requirePermission`.**
+   TM-04 gives agents the break *control*; TM-05 says they hold no `monitoring.*` key. Both hold
+   because the routes act only on the caller's own session and never accept a userId. Creating a
+   `monitoring.break.self` key would have tripped my own AD-02 guard.
+5. **Productivity excludes break from the denominator** (active ÷ (active + idle)). A sanctioned
+   break should not read as unproductive, or the number just punishes taking one.
+6. **`breakMinutesUsedToday` removed from the agent route after I first wrote it.** TM-05 names
+   "Break/Pause Time" explicitly. `/api/monitoring/me` now returns only: on-break flag, current
+   break's start timestamp, and the two configured limits (rules, not measurements). See the open
+   question below.
+
+**Verified against a running server, cron included**
+- Login creates a work session; heartbeat with activity keeps ACTIVE.
+- **Idle sweep fired from cron with no browser open** — the whole point of TM-03. Precise accrual
+  test: `lastHeartbeatAt` −10min, `lastActivityAt` −8min → **active_ms exactly 120000** (the 2-min
+  gap) and idle accruing from the last activity. `idle_count` 1. Log: `idle sweep: 1 marked idle`.
+- Resume: heartbeat with activity → ACTIVE, `resumed: true`.
+- Break: start → BREAK + open period; double-start → 409; heartbeat stays BREAK; end → ACTIVE,
+  `break_ms` == `duration_ms`, reason kept, `auto_closed` false.
+- **Closed-laptop case:** auth session revoked without a logout → sweep pass 2 closed the work
+  session. Log: `0 marked idle, 1 work session(s) closed`.
+- Logout → ENDED with `ended_at` and final counters intact.
+- TM-06: `session.login`, `session.logout`, `monitoring.idle.start/end`, `monitoring.break.start/end`
+  all written to `activity_events`.
+- **TM-05, both layers:** agent and HR → `/api/monitoring/live` = 403; `/management/monitoring` =
+  307 → `/403`; management = 200. Agent's resolved permission set still holds **zero**
+  `monitoring.*` keys. Agent route payload contains no active/idle/break/productivity value.
+- `tsc --noEmit` clean, `npm run build` clean, `ƒ Proxy (Middleware)` present, dev log error-free.
+
+**OPEN QUESTION for the call-centre owner** (pair it with Dev A's `returnNoAnswerOnLogout`):
+should an agent be able to see how much break they have used today? TM-05 lists "Break/Pause Time"
+as Management-only, so the strict reading — what is built — hides it. The cost is that an agent
+can only overrun their allowance by accident. A one-line change to `/api/monitoring/me` if they
+say yes.
+
+**Deferred, as pre-agreed:** TM-02 desktop workstation/application monitoring is #1 on GLOBAL.md's
+Scope Watch. CRM screen time + idle detection is built and needs no desktop install.
+
+**Next — Day 5: HR Module.** `work_sessions` now exists, so HR-04's attendance view has real data
+to read.
+
+**Day 4 addendum — Sourcery review fixes (4 of 5 accepted)**
+
+1. **Stale-ACTIVE + `hadActivity:true` booked the whole gap as active — REAL, fixed.** Only the
+   no-activity path checked staleness. If the window had already elapsed and input arrived before
+   the sweep caught it (server restart, machine resumed from sleep), the entire gap accrued as
+   ACTIVE — exactly the "reward idling in four-minute increments" failure this module exists to
+   prevent. Both paths now share one `splitStaleInterval()`. **Reproduced:** marker −10 min,
+   activity −8 min → **120s active / 480s idle**, where the old code gave 600s active.
+2. **Read-then-increment race between heartbeats and the sweep — REAL, fixed.** The counters were
+   atomic increments, but the delta was computed from a stale snapshot and `lastHeartbeatAt` /
+   `state` were last-write-wins, so an overlap double-counted and could clobber a transition. Every
+   mutation now runs inside `withLockedSession()` (`SELECT … FOR UPDATE`, same idiom as Dev A's
+   assignment transaction). **Reproduced:** 10 concurrent heartbeats against a 60s-old marker →
+   **60s accrued once**, not up to 600s.
+3. **Concurrent `startBreak` — REAL, fixed.** State was checked before the transaction, so two
+   requests could both open a break period; `endBreak` closes only the newest, orphaning the other
+   forever. The check now happens under the lock. **Reproduced:** 8 concurrent starts → 1 success,
+   7×409, exactly one break row, `break_count` 1.
+4. **Expiry sweep closed at sweep time, not termination time — REAL, fixed.** Time between an auth
+   session actually dying and the next cron tick accrued as idle, and an open break's duration was
+   inflated to match. A minute in normal running — but a whole night after an outage, which would
+   wreck a punctuality report. `endWorkSession()` now takes an `endAt`, and the sweep passes
+   `revokedAt`/`expiresAt`. **While fixing this I found a gap in my own fix:** pass 1 (idle) didn't
+   exclude already-dead sessions, so it pushed the marker past the termination time and defeated
+   the cap. Pass 1 now skips them. **Reproduced:** marker −20 min, expired −10 min → `ended_at`
+   exactly equals `expires_at` (delta 0) and **600s accrued, not 1200s**.
+5. **INTEGER overflow on the ms counters — NOT ACCEPTED as written.** Real arithmetic (INTEGER caps
+   at 24.86 days) but unreachable: a work session is 1:1 with an auth session, and
+   `SESSION_TTL_HOURS` is 8, so one bucket holds at most ~28.8M ms against a 2.1B limit. Reaching
+   it needs a 600-hour TTL. Migrating to `BigInt` would also have rippled into JSON serialization
+   (`BigInt` does not `JSON.stringify`) across the engine and the live route — real breakage risk
+   for an unreachable bug. **The underlying danger is a bogus delta, not a long shift**, and BigInt
+   would only have raised the ceiling on the garbage. Added `MAX_ACCRUAL_MS` (24h) instead: any
+   single accrual beyond that is clamped and logged, which catches clock jumps, hibernation and
+   multi-day outages — and incidentally makes overflow impossible.
+
+Regression after all four: break lifecycle, heartbeat-during-break, TM-05 at both layers, agent
+payload still metric-free, logout close. `tsc` + build clean, dev log free of errors and clamp
+warnings.

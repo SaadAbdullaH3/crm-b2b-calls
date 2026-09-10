@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { destroySession } from "@/lib/auth/session";
 import { EVENTS, emitToUser } from "@/server/socket";
 import { returnUncalledLeadsIfSignedOut } from "@/server/leads/assignment";
+import { endWorkSession } from "@/server/monitoring/engine";
 
 export async function POST() {
   const ended = await destroySession();
@@ -27,7 +28,17 @@ export async function POST() {
       console.error("[logout] lead return failed", ended.userId, e);
     }
 
-    // Dev B's monitoring engine stops screen time on this event.
+    // TM-01 — stop screen time for THIS session. Scoped to the session that
+    // ended, not the user: someone signed in on two machines who closes one is
+    // still working on the other, and that session keeps accruing.
+    try {
+      await endWorkSession(ended.sessionId, "logout");
+    } catch (e) {
+      // Same rule as the lead return — never block a logout. The idle sweep
+      // closes orphaned work sessions within the minute.
+      console.error("[logout] work session close failed", ended.sessionId, e);
+    }
+
     emitToUser(ended.userId, EVENTS.SESSION_ENDED, {
       userId: ended.userId,
       sessionId: ended.sessionId,
