@@ -364,3 +364,15 @@ Verified two ways, both with a positive control so a passing test means somethin
 Lint is **32** (was 30). The 2 added are the same `set-state-in-effect` house pattern; I removed 4 `no-unused-vars` of my own by projecting the timeline's lead object explicitly instead of destructuring-to-discard. The remaining 2 unused-vars and 1 refs are Dev B's.
 
 **Next — Day 7:** Reporting Engine backend — aggregation queries for Daily/Weekly/Monthly/Punctuality plus Lead Source, exposed as filterable endpoints for Dev B's frontend. **Reuse `src/server/dashboard/metrics.ts` rather than writing a second set of aggregations** — Dev B flagged that explicitly, and two definitions of "worked" would put the dashboard and the reports permanently at odds.
+
+**End-of-day addendum (2026-09-10, Day 6)**
+- Day 6 merged to `main` as `728ddc1` and pushed. Branch `deva/day-6-agent-dashboard-timeline` (`9fccfc4`) is on the remote. **Dev A is now through Day 6, matching Dev B.** `git branch -r --no-merged origin/main` is empty.
+- No draft PR was opened, so the merge went in directly again. Same note as Day 4: if a PR record is wanted, open it *before* asking for the merge — `gh` is not installed here, so PRs need a browser click and once the commits are on `main` a PR is moot.
+- **Both days this session shipped without a migration touching another track's tables.** Day 5 added one nullable column (`callbacks.reminded_at`); Day 6 added none. NF-07 index verified after each.
+- Local state: dev server on :3000, Postgres container up. 50 leads, agent1 holds 15, 1 Do-Not-Call, 10 calls, 3 callbacks — enough to exercise every Day 5/6 screen. `docker compose down` to stop the database.
+- **Day 7 is the first day the two tracks build the same feature from both ends.** Dev B owns the reporting frontend, I own the aggregation backend, and they asked explicitly that I reuse `src/server/dashboard/metrics.ts` rather than writing a second set of queries. Two definitions of "worked" would put the dashboard and the reports permanently at odds — and that disagreement surfaces in front of the client, not in review. Agree the API contract with them before writing queries.
+- **Still open and now more urgent — three items carried since Day 1–4:**
+  1. The SRS requirements-traceability doc still does not exist. **Day 10 is a regression against exactly that list and we are through Day 6.** This is the item I would do next if given a free slot.
+  2. `assignment.config.returnNoAnswerOnLogout` — the call-centre owner's decision, still unanswered.
+  3. Whether agents may see their own break time (Dev B's TM-05 question) — same conversation, worth asking together.
+- Lint is 32 and has grown every day (13 → 16 → 17 → 26 → 30 → 32). Day 9's NFR pass owns it, but the Day 5 lesson stands: a pile that size is where a genuinely new rule class hides.
