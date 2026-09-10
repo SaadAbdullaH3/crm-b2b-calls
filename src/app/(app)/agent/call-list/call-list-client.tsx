@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -230,7 +231,13 @@ export function CallListClient() {
                 return (
                   <TableRow key={lead.id}>
                     <TableCell>
-                      <div className="font-medium">{lead.companyName ?? "—"}</div>
+                      <Link
+                        href={`/agent/leads/${lead.id}`}
+                        className="font-medium underline-offset-4 hover:underline"
+                        title="See this lead's history before you call"
+                      >
+                        {lead.companyName ?? lead.contactName ?? "—"}
+                      </Link>
                       <div className="text-xs text-muted-foreground">
                         {[lead.contactName, lead.jobTitle].filter(Boolean).join(" · ") ||
                           "—"}
