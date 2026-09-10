@@ -23,6 +23,7 @@ export const NAV: Record<string, NavItem[]> = {
     { href: "/agent/request-leads", label: "Request Leads", day: 3 },
     { href: "/messages", label: "Messages", day: 3 },
     { href: "/announcements", label: "Announcements", day: 3 },
+    { href: "/leave", label: "My Leave", day: 5 },
     // No monitoring/productivity entries here. See the TM-05 note above.
   ],
   management: [
@@ -50,8 +51,8 @@ export const NAV: Record<string, NavItem[]> = {
   hr: [
     { href: "/hr", label: "Overview", day: 5 },
     { href: "/hr/employees", label: "Employees", day: 5 },
-    { href: "/hr/documents", label: "Documents", day: 5 },
-    { href: "/hr/leave", label: "Leave Requests", day: 5 },
+    { href: "/hr/holidays", label: "Holidays", day: 5 },
+    { href: "/leave", label: "Leave Requests", day: 5 },
     { href: "/messages", label: "Messages", day: 3 },
     { href: "/announcements", label: "Announcements", day: 3 },
   ],

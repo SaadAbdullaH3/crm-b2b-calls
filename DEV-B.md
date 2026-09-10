@@ -447,3 +447,80 @@ to read.
 Regression after all four: break lifecycle, heartbeat-during-break, TM-05 at both layers, agent
 payload still metric-free, logout close. `tsc` + build clean, dev log free of errors and clamp
 warnings.
+
+### 2026-09-10 — Day 5: HR Module (HR-01 … HR-08)
+
+Branch `devb/day-5-hr-module`. Pulled Dev A's Days 2–4 first (he is ahead — his Assignment Engine
+is merged); `npm ci` for `exceljs` + `libphonenumber-js`. **36 tables.** Both hand-written indexes
+re-verified after migrating: `lead_assignments_one_active_holder` and `conversations_pair_key_key`.
+
+**Shipped**
+- Schema: extended `hr_employees` (shift, employment type, probation/exit dates, emergency
+  contact) and `hr_documents` (uploader, mime, size, type enum); new `hr_employee_events` (HR-06)
+  and `holidays` (HR-05); `leave_requests` gained a `LeaveType` enum, `days` and `reviewComment`.
+  Four new enums. All HR tables were empty, so the String→enum changes were safe — checked before
+  migrating rather than assuming.
+- `src/server/hr/documents.ts` — validation, storage, safe read-back.
+- `src/server/hr/leave.ts` — working-day computation against the shift config and holiday calendar,
+  plus overlap detection.
+- 10 API routes; screens: `/hr` (overview + HR-04 attendance), `/hr/employees` (profile, documents,
+  history), `/hr/holidays`, and a shared `/leave` for every role.
+- Two new permissions: `hr.attendance.read`, `hr.holidays.manage`.
+
+**Decisions**
+1. **Name, email, phone and employee code stay on `users` — not duplicated onto `hr_employees`.**
+   Two copies of a phone number is two answers to "what is their phone number". The HR table holds
+   only what is true of the EMPLOYMENT.
+2. **The uploaded filename never touches the filesystem.** Files are stored as `<document id>.<ext>`
+   under `/uploads/hr`; the original name is kept in the database and reattached at download.
+   A client-supplied name is an attacker-supplied path.
+3. **Extension allowlist, not a blocklist** — a blocklist is a promise to have thought of every
+   dangerous extension. Archives excluded deliberately: unreviewable, and a decompression bomb.
+4. **Downloads are always `attachment`, never `inline`.** An inline PDF renders under this app's
+   origin, which turns any malicious upload into same-origin content. Plus `no-store` and `nosniff`.
+5. **`leave_requests.days` is computed at submission and STORED.** Deriving it at read time would
+   mean adding a holiday in December silently rewrites how many days someone took in March.
+6. **Employment history has no edit or delete path.** A warning that can be quietly removed is not
+   a record; corrections are added as a further note, the way a ledger is corrected.
+7. **Documents are NOT embedded in the employee-detail response.** That route needs only
+   `hr.employees.read`, which Management holds; documents need `hr.documents.manage`, which it does
+   not. Embedding them would have silently widened the narrower permission to match the wider one —
+   the easiest possible way to breach HR-07 without noticing.
+8. **Document counts are hidden from Management on the overview too.** "18 documents on file" leaks
+   the existence and volume of restricted records without showing one.
+
+**Bug found in the inherited permission baseline, fixed:** Management held no `hr.leave.request`,
+so a manager could not request their own leave or even see the holiday calendar. A manager is an
+employee who takes holidays. Granted the request key only — `hr.leave.approve` stays with HR.
+Surfaced by actually running the permission matrix rather than reading it.
+
+**Verified end to end**
+
+| Route | HR | Management | Agent |
+|---|---|---|---|
+| `/api/hr/employees` | 200 | 200 | 403 |
+| `/api/hr/attendance` | 200 | 200 | 403 |
+| `/api/hr/leave` | 200 | 200 | 200 |
+| **`.../documents`** | **200** | **403** | **403** |
+
+- **HR-07 holds**: Management gets 403 on both the document list and the download — matching SRS §17
+  "Restricted".
+- **Path traversal**: uploading with filename `../../../../etc/passwd.pdf` stored
+  `<cuid>.pdf` inside `/uploads/hr` and recorded the display name as `passwd.pdf`. Nothing escaped.
+- **Allowlist**: `.exe` rejected with the allowed list in the message.
+- **Download headers**: `attachment`, `private, no-store`, `nosniff`, RFC 5987 filename.
+- **Leave maths**: Mon–Fri spanning one holiday → **4 days charged** of 5 calendar; Fri→Mon →
+  **2 days** of 4 calendar.
+- **Overlap** rejected with the clashing dates named. **Impersonation** ("file leave as Management")
+  rejected for an agent.
+- **Own-scope**: agent1 sees 3 requests, all their own; HR sees 4 across two people.
+- **Concurrent approval**: 6 simultaneous reviews → one decision stands, five conflicts, original
+  comment intact (conditional `WHERE status='PENDING'`, same pattern as Dev A's request resolution).
+- **TM-05 still holds**: the HR-04 attendance payload contains no active/idle/break/productivity
+  key — only login, last seen, session count and lateness. Agent's permission set: 7 keys, zero
+  `monitoring.*`, one `hr.*`.
+- `tsc` clean, `npm run build` clean, `ƒ Proxy (Middleware)` present, dev log error-free.
+
+**Next — Day 6: Management Dashboard.** The one day with a hard dependency on Dev A, and he has
+Days 2–5 done, so it is unblocked. Approving a lead request means calling HIS endpoint, never
+writing `leads`/`lead_assignments` directly.

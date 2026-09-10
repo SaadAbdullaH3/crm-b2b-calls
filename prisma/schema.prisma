@@ -126,6 +126,46 @@ enum LeaveStatus {
   CANCELLED
 }
 
+/// HR-05. Kept an enum rather than free text so the leave report can group
+/// reliably — "Sick"/"sick"/"Sick leave" typed by three people is three
+/// categories in a report and one in reality.
+enum LeaveType {
+  ANNUAL
+  SICK
+  UNPAID
+  CASUAL
+  BEREAVEMENT
+  OTHER
+}
+
+/// HR-02. The SRS names undertakings, agreements, warning letters and
+/// performance reviews explicitly, then allows "other authorized HR
+/// documents" — hence OTHER rather than a free-text column.
+enum HrDocumentType {
+  UNDERTAKING
+  AGREEMENT
+  CONTRACT
+  WARNING_LETTER
+  PERFORMANCE_REVIEW
+  ID_PROOF
+  CERTIFICATE
+  OTHER
+}
+
+/// HR-06 — the employment-history timeline.
+enum HrEventType {
+  JOINED
+  CONFIRMED
+  PROMOTION
+  ROLE_CHANGE
+  WARNING
+  PERFORMANCE_REVIEW
+  COMMENDATION
+  PROBATION
+  EXIT
+  NOTE
+}
+
 enum ConversationType {
   DIRECT
   GROUP
@@ -254,6 +294,11 @@ model User {
   reportsGenerated      ReportGenerated[]
   scoresReceived        ManagementScore[]            @relation("ScoreSubject")
   scoresGiven           ManagementScore[]            @relation("ScoreAuthor")
+
+  // --- Dev B, Day 5: HR Module -------------------------------------------
+  hrDocumentsUploaded HrDocument[]      @relation("HrDocumentUploader")
+  hrEventsRecorded    HrEmployeeEvent[] @relation("HrEventRecorder")
+  holidaysCreated     Holiday[]         @relation("HolidayCreator")
 
   // --- Dev B, Day 4: Monitoring Engine -----------------------------------
   workSessions WorkSession[] @relation("WorkSessionUser")
@@ -969,50 +1014,147 @@ model AnnouncementAcknowledgement {
   @@map("announcement_acknowledgements")
 }
 
+/// HR-01 - the employment record for one user.
+///
+/// Employee id, name, email and phone deliberately live on `users` and are NOT
+/// duplicated here: two copies of a phone number is two answers to "what is
+/// their phone number". This table holds only what is true of the EMPLOYMENT
+/// rather than of the login.
 model HrEmployee {
-  id          String    @id @default(cuid())
-  userId      String    @unique @map("user_id")
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+
   department  String?
   designation String?
-  joinedAt    DateTime? @map("joined_at")
-  managerName String?   @map("manager_name")
-  notes       String?
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  /// HR-01 shift. Free text ("09:00-18:00", "Night"). The authoritative
+  /// working window for punctuality lives in `shift.config` (AD-07); this is
+  /// the human label on the contract.
+  shift          String?
+  employmentType String?   @map("employment_type")
+  joinedAt       DateTime? @map("joined_at")
+  /// End of probation, if used.
+  confirmedAt    DateTime? @map("confirmed_at")
+  /// Set when employment ends. The row is retained - HR-06 history and any
+  /// audit trail must survive someone leaving.
+  exitedAt       DateTime? @map("exited_at")
 
-  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  managerName           String?   @map("manager_name")
+  dateOfBirth           DateTime? @map("date_of_birth")
+  address               String?
+  emergencyContactName  String?   @map("emergency_contact_name")
+  emergencyContactPhone String?   @map("emergency_contact_phone")
+  notes                 String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   documents HrDocument[]
+  events    HrEmployeeEvent[]
 
+  @@index([exitedAt])
   @@map("hr_employees")
 }
 
+/// HR-02/HR-03 - a stored employee document plus the metadata the SRS
+/// requires: type, upload date, uploader, employee, notes, optional expiry.
+///
+/// `storedPath` points OUTSIDE the web root (`/uploads`, gitignored) and the
+/// file on disk is named by this row id, never by the uploaded filename - a
+/// client-supplied name is an attacker-supplied path. The original name is
+/// kept in `fileName` only so a download can restore it.
+///
+/// The file is never served statically. Every read goes through a route that
+/// checks permission first; a guessable static URL would make HR-07
+/// meaningless.
 model HrDocument {
-  id         String    @id @default(cuid())
-  employeeId String    @map("employee_id")
-  docType    String    @map("doc_type")
-  fileName   String    @map("file_name")
-  storedPath String    @map("stored_path")
-  expiresAt  DateTime? @map("expires_at")
-  notes      String?
-  uploadedAt DateTime  @default(now()) @map("uploaded_at")
+  id         String         @id @default(cuid())
+  employeeId String         @map("employee_id")
+  docType    HrDocumentType @default(OTHER) @map("doc_type")
 
-  employee HrEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  /// The name the uploaded file had. Display and download only.
+  fileName   String  @map("file_name")
+  storedPath String  @map("stored_path")
+  mimeType   String? @map("mime_type")
+  sizeBytes  Int?    @map("size_bytes")
+
+  /// HR-03 optional expiry/renewal date - visas, certifications, contracts.
+  expiresAt    DateTime? @map("expires_at")
+  notes        String?
+  uploadedById String    @map("uploaded_by_id")
+  uploadedAt   DateTime  @default(now()) @map("uploaded_at")
+
+  employee   HrEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  uploadedBy User       @relation("HrDocumentUploader", fields: [uploadedById], references: [id])
 
   @@index([employeeId, docType])
   @@index([expiresAt])
   @@map("hr_documents")
 }
 
+/// HR-06 - employment history: warnings, reviews, promotions, role changes.
+///
+/// Append-only in practice. A warning that can be quietly deleted is not a
+/// record, and an exit review months later depends on this being complete.
+model HrEmployeeEvent {
+  id         String      @id @default(cuid())
+  employeeId String      @map("employee_id")
+  type       HrEventType
+  title      String
+  details    String?
+  /// When the event took effect, which is not always when it was recorded.
+  effectiveDate DateTime @map("effective_date")
+
+  recordedById String   @map("recorded_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  employee   HrEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  recordedBy User       @relation("HrEventRecorder", fields: [recordedById], references: [id])
+
+  @@index([employeeId, effectiveDate])
+  @@index([type])
+  @@map("hr_employee_events")
+}
+
+/// HR-05 - the holiday calendar.
+///
+/// Separate from `leave_requests`: a public holiday applies to everyone and
+/// nobody requests it, so modelling it as an approved leave row per employee
+/// would be both wrong and N rows per holiday.
+model Holiday {
+  id          String   @id @default(cuid())
+  name        String
+  date        DateTime
+  /// Falls on the same calendar date every year. A moving holiday gets one
+  /// row per year instead.
+  isRecurring Boolean  @default(false) @map("is_recurring")
+  description String?
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  createdBy User? @relation("HolidayCreator", fields: [createdById], references: [id])
+
+  @@unique([name, date])
+  @@index([date])
+  @@map("holidays")
+}
+
 model LeaveRequest {
   id           String      @id @default(cuid())
   requesterId  String      @map("requester_id")
-  leaveType    String      @map("leave_type")
+  leaveType    LeaveType   @default(ANNUAL) @map("leave_type")
   startDate    DateTime    @map("start_date")
   endDate      DateTime    @map("end_date")
+  /// Working days requested, computed at submission from the configured
+  /// working days and the holiday calendar. Stored rather than derived so a
+  /// later change to either does not silently rewrite history.
+  days         Int         @default(1)
   reason       String?
   status       LeaveStatus @default(PENDING)
   reviewedById String?     @map("reviewed_by_id")
   reviewedAt   DateTime?   @map("reviewed_at")
+  /// HR-05 "comments" - the reviewer note, shown to the requester.
+  reviewComment String?    @map("review_comment")
   createdAt    DateTime    @default(now()) @map("created_at")
   updatedAt    DateTime    @updatedAt @map("updated_at")
 

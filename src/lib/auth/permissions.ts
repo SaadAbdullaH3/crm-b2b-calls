@@ -59,6 +59,8 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: "hr.documents.manage", module: "hr", description: "Upload and manage HR documents" },
   { key: "hr.leave.request", module: "hr", description: "Submit leave requests" },
   { key: "hr.leave.approve", module: "hr", description: "Approve or reject leave requests" },
+  { key: "hr.attendance.read", module: "hr", description: "View attendance and punctuality records (HR-04)" },
+  { key: "hr.holidays.manage", module: "hr", description: "Manage the holiday calendar (HR-05)" },
 
   // --- Admin (Dev B, Day 2) ------------------------------------------------
   { key: "admin.users.manage", module: "admin", description: "Create, edit and deactivate users" },
@@ -107,6 +109,15 @@ const MANAGEMENT_PERMISSIONS = [
   "reports.score.manage",
   "comms.message",
   "comms.broadcast",
+  // HR-07 / SRS §17: Management sees employee profiles and attendance, but
+  // NOT HR documents ("Restricted") and does not approve leave. Adding
+  // hr.documents.manage here would be the single easiest way to breach HR-07.
+  "hr.employees.read",
+  "hr.attendance.read",
+  // A manager is also an employee: they take holidays and need to see the
+  // holiday calendar. This grants requesting leave, not approving it —
+  // hr.leave.approve stays with HR.
+  "hr.leave.request",
 ];
 
 const HR_PERMISSIONS = [
@@ -115,6 +126,8 @@ const HR_PERMISSIONS = [
   "hr.documents.manage",
   "hr.leave.request",
   "hr.leave.approve",
+  "hr.attendance.read",
+  "hr.holidays.manage",
   "comms.message",
   "comms.broadcast",
 ];
