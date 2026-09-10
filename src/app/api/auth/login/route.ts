@@ -5,6 +5,7 @@ import { verifyPassword } from "@/lib/auth/password";
 import { createSession } from "@/lib/auth/session";
 import { ROLE_HOME } from "@/lib/auth/permissions";
 import { EVENTS, emitToUser } from "@/server/socket";
+import { startWorkSession } from "@/server/monitoring/engine";
 
 const LoginSchema = z.object({
   email: z.string().email(),
@@ -56,7 +57,14 @@ export async function POST(req: Request) {
     data: { lastLoginAt: new Date() },
   });
 
-  // Dev B's monitoring engine starts counting screen time from this event.
+  // TM-01 — screen time starts here, against this session id. Awaited so the
+  // work session exists before the client's first heartbeat can arrive.
+  try {
+    await startWorkSession(sessionId, user.id);
+  } catch (e) {
+    console.error("[login] work session start failed", sessionId, e);
+  }
+
   emitToUser(user.id, EVENTS.SESSION_STARTED, {
     userId: user.id,
     sessionId,

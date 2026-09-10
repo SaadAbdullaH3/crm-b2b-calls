@@ -132,6 +132,20 @@ enum ConversationType {
   BROADCAST
 }
 
+/// What a user is doing right now, per TM-03/TM-04. Exactly one of these is
+/// true at a time, and elapsed time accrues to the matching bucket on
+/// `work_sessions`.
+enum WorkSessionState {
+  /// Qualifying activity seen within the inactivity window.
+  ACTIVE
+  /// TM-03: no qualifying activity for `monitoring.inactivityMinutes`.
+  IDLE
+  /// TM-04: the agent put themselves on break. Neither active nor idle.
+  BREAK
+  /// Signed out, session expired, or swept. No further time accrues.
+  ENDED
+}
+
 /// Who an announcement reaches (CM-06). ROLE and GROUP are resolved to
 /// concrete users at publish time so later membership changes don't silently
 /// alter who was required to acknowledge.
@@ -241,6 +255,10 @@ model User {
   scoresReceived        ManagementScore[]            @relation("ScoreSubject")
   scoresGiven           ManagementScore[]            @relation("ScoreAuthor")
 
+  // --- Dev B, Day 4: Monitoring Engine -----------------------------------
+  workSessions WorkSession[] @relation("WorkSessionUser")
+  breaks       BreakPeriod[] @relation("BreakUser")
+
   // --- Dev B, Day 2: Admin Configuration ---------------------------------
   groupMemberships GroupMember[]         @relation("GroupMembership")
   groupsCreated    Group[]               @relation("GroupCreator")
@@ -267,6 +285,8 @@ model Session {
   createdAt  DateTime  @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Dev B, Day 4: TM-01 screen time accrues against this session.
+  workSession WorkSession?
 
   @@index([userId, revokedAt])
   @@index([expiresAt])
@@ -737,6 +757,85 @@ model LeadFieldDefinition {
 
   @@index([isActive, sortOrder])
   @@map("lead_field_definitions")
+}
+
+// ---------------------------------------------------------------------------
+// Monitoring Engine (Dev B, Day 4) — TM-01, TM-03, TM-04, TM-06
+// ---------------------------------------------------------------------------
+
+/// TM-01 — one row per signed-in auth session, accumulating screen time.
+///
+/// Keyed 1:1 to Dev A's `sessions` row rather than to the user, because that
+/// is what makes "screen time" a real measurement: the session already has a
+/// definite start (login) and end (logout, revoke or expiry), and Dev A's
+/// lead-return rules key off exactly the same lifecycle.
+///
+/// Time is ACCUMULATED, not derived from an event log. Each heartbeat adds the
+/// elapsed interval since `lastHeartbeatAt` to whichever bucket the current
+/// `state` names, then moves the marker. A month of monitoring is therefore a
+/// few hundred rows rather than millions of heartbeats, and a report reads
+/// counters instead of replaying history.
+model WorkSession {
+  id        String @id @default(cuid())
+  sessionId String @unique @map("session_id")
+  userId    String @map("user_id")
+
+  state WorkSessionState @default(ACTIVE)
+
+  startedAt DateTime  @default(now()) @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+
+  /// Marker for the accumulator: everything before this instant has already
+  /// been counted into one of the buckets below.
+  lastHeartbeatAt DateTime @default(now()) @map("last_heartbeat_at")
+  /// Last moment qualifying activity was actually seen. TM-03 compares this,
+  /// not `lastHeartbeatAt` — a heartbeat proves the tab is open, not that
+  /// anyone is working.
+  lastActivityAt  DateTime @default(now()) @map("last_activity_at")
+
+  // --- accumulated buckets, milliseconds (TM-05: Management-only) ----------
+  activeMs Int @default(0) @map("active_ms")
+  idleMs   Int @default(0) @map("idle_ms")
+  breakMs  Int @default(0) @map("break_ms")
+
+  /// How many times this session went idle. A shift that flickered idle 40
+  /// times reads very differently from one that idled once over lunch.
+  idleCount  Int @default(0) @map("idle_count")
+  breakCount Int @default(0) @map("break_count")
+
+  session Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User          @relation("WorkSessionUser", fields: [userId], references: [id], onDelete: Cascade)
+  breaks  BreakPeriod[]
+
+  @@index([userId, startedAt])
+  @@index([state])
+  // The idle sweep's hot query: open sessions whose activity has gone stale.
+  @@index([state, lastActivityAt])
+  @@map("work_sessions")
+}
+
+/// TM-04 — one row per break, kept separately from `work_sessions.breakMs` so
+/// Management can see WHEN breaks were taken and how long each ran, not just a
+/// daily total. MG-07's punctuality report needs the individual periods.
+model BreakPeriod {
+  id            String    @id @default(cuid())
+  workSessionId String    @map("work_session_id")
+  userId        String    @map("user_id")
+  startedAt     DateTime  @default(now()) @map("started_at")
+  endedAt       DateTime? @map("ended_at")
+  durationMs    Int?      @map("duration_ms")
+  reason        String?
+  /// True when the break was closed by logout or the sweep rather than by the
+  /// agent pressing "end break" — an unclosed break is a data-quality signal,
+  /// not a 9-hour lunch.
+  autoClosed    Boolean   @default(false) @map("auto_closed")
+
+  workSession WorkSession @relation(fields: [workSessionId], references: [id], onDelete: Cascade)
+  user        User        @relation("BreakUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startedAt])
+  @@index([workSessionId])
+  @@map("break_periods")
 }
 
 // ---------------------------------------------------------------------------

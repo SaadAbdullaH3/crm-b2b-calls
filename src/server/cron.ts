@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { runAutoAssignSweep } from "@/server/leads/requests";
 import { runExpiredSessionSweep } from "@/server/leads/sessions";
+import { runIdleSweep } from "@/server/monitoring/engine";
 
 /**
  * Server-side scheduled jobs, running inside the custom server process.
@@ -56,12 +57,23 @@ async function expiredSessionSweep() {
   }
 }
 
-/** Day 4 (Dev B) — TM-03: mark agents idle after 5 minutes without a heartbeat. */
+/**
+ * TM-03 (Dev B, Day 4) — mark agents idle after the configured window without
+ * qualifying activity, and close work sessions whose auth session has gone.
+ *
+ * This has to be a job. An agent who shuts their laptop sends no further
+ * heartbeat, so nothing browser-side would ever mark them idle and their
+ * shift would read as 100% active. The window comes from
+ * `monitoring.config.inactivityMinutes` (AD-07), not a constant.
+ */
 async function idleSweep() {
-  // Dev B's Monitoring Engine fills this in. Left registered so the wiring is
-  // proven on Day 1 and they only have to write the body.
-  if (process.env.CRON_VERBOSE === "true") {
-    console.log("[cron] idle sweep tick (no-op until Dev B's Day 4)");
+  const result = await runIdleSweep();
+  if (result.markedIdle > 0 || result.closed > 0) {
+    console.log(
+      `[cron] idle sweep: ${result.markedIdle} marked idle, ${result.closed} work session(s) closed`,
+    );
+  } else if (process.env.CRON_VERBOSE === "true") {
+    console.log("[cron] idle sweep tick — nothing due");
   }
 }
 

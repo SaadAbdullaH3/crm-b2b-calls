@@ -98,6 +98,33 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 }
 
 /**
+ * The current session's id, or null.
+ *
+ * Added by Dev B on Day 4. The Monitoring Engine measures screen time PER
+ * SESSION, not per user — someone signed in on two machines has two work
+ * sessions — so the heartbeat and break routes need the session id, and
+ * `SessionUser` deliberately does not carry it.
+ *
+ * Read-only and additive: nothing existing changes behaviour. Kept separate
+ * from getCurrentUser() so a route that only needs the id doesn't pay for the
+ * role/permission join.
+ */
+export async function getCurrentSessionId(): Promise<string | null> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  if (!token) return null;
+
+  const session = await prisma.session.findUnique({
+    where: { tokenHash: hashToken(token) },
+    select: { id: true, revokedAt: true, expiresAt: true },
+  });
+
+  if (!session || session.revokedAt) return null;
+  if (session.expiresAt <= new Date()) return null;
+  return session.id;
+}
+
+/**
  * Revokes the current session and clears the cookie. Returns the revoked
  * session's id and user id so the caller can fire the LA-09 lead-return job
  * and the SESSION_ENDED socket event.
