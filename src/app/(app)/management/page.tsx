@@ -1,17 +1,17 @@
-import { DayPlaceholder } from "@/components/day-placeholder";
+import { requirePageAuth } from "@/lib/auth/guard";
+import { hasPermission } from "@/lib/auth/rbac";
+import { redirect } from "next/navigation";
+import { DashboardClient } from "./dashboard-client";
 
-export default function ManagementPage() {
-  return (
-    <DayPlaceholder
-      title="Management Console"
-      description="Lead imports, request approvals, agent performance and reporting."
-      upcoming={[
-        { day: 2, label: "Lead import: upload, column mapping, duplicate detection" },
-        { day: 3, label: "Validation summary, error export, import history" },
-        { day: 4, label: "Request approval queue with 5-minute auto-assign" },
-        { day: 6, label: "KPI dashboard and agent drill-down" },
-        { day: 7, label: "Reporting engine" },
-      ]}
-    />
-  );
+/**
+ * SRS §8.1 — the Management Console.
+ *
+ * Permission-gated rather than role-gated so Admin reaches it too. The real
+ * boundary is on /api/management/dashboard, which also decides independently
+ * whether the monitoring block is included.
+ */
+export default async function ManagementPage() {
+  const user = await requirePageAuth();
+  if (!hasPermission(user, "dashboard.management")) redirect("/403");
+  return <DashboardClient />;
 }

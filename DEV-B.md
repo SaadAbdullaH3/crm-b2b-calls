@@ -524,3 +524,104 @@ Surfaced by actually running the permission matrix rather than reading it.
 **Next — Day 6: Management Dashboard.** The one day with a hard dependency on Dev A, and he has
 Days 2–5 done, so it is unblocked. Approving a lead request means calling HIS endpoint, never
 writing `leads`/`lead_assignments` directly.
+
+### 2026-09-10 — Day 6: Management Console (SRS §8.1, MG-05, MG-10)
+
+Branch `devb/day-6-management-dashboard`. Main was current — **Dev A has not pushed his Day 5
+(Agent Calling Workspace) yet**, so nothing writes to `calls` for real. No schema change today;
+36 tables unchanged.
+
+**Shipped**
+- `src/server/dashboard/metrics.ts` — all aggregation, **computed in SQL**. `groupBy`, `aggregate`
+  and two `$queryRaw` FILTER queries; no `findMany().reduce()` anywhere. A dashboard is the screen
+  most likely to be left open on a wall display refetching all day, and the naive version works
+  fine at 120 rows and dies at 50,000.
+- `GET /api/management/dashboard` — lead pipeline, source performance, per-agent results, outcome
+  mix, pending request count.
+- `GET /api/management/agents/[id]` — MG-05 drill-down: calls, leads held, callbacks, MG-10
+  activity feed, attendance, work sessions, lead-request history.
+- `/management` dashboard and `/management/agents/[id]`.
+- `scripts/make-dashboard-fixture.ts` — 120 leads across 4 sources, assigned through **Dev A's real
+  `assignLeadsFromPool`**, 55 calls with a weighted outcome mix, 13 callbacks, 1 pending request.
+
+**Decisions**
+1. **Read-only over Dev A's tables.** Nothing in `metrics.ts` writes. The approval queue links to
+   his `/api/leads/requests/[id]/resolve` — his transaction owns the ownership columns and the
+   `lead_assignments_one_active_holder` index.
+2. **The fixture assigns through his function, not by direct insert.** A fixture that bypassed the
+   assignment transaction would produce data the real app could never create, and the dashboard
+   would then be verified against a fiction. Calls ARE inserted directly — that is the one part
+   standing in for absent code (his Day 5) rather than exercising present code, and it is labelled
+   as such in the script.
+3. **`monitoring.view` is checked separately from `dashboard.management`**, inside the same route.
+   Checking the role instead would have made the AD-02 matrix decorative — see the verification
+   below, which is the whole point of preferring permission keys over role names.
+4. **`calls.recording.access` gates `recordingRef` at the SELECT**, not in the UI. A reference is
+   not the recording, but it is the handle that fetches one (CL-05).
+5. **"Called" means a disposition was recorded**, not that a `calls` row exists — a dialled-and-
+   abandoned attempt is not a worked lead.
+6. **Source conversion is qualified ÷ CALLED, not ÷ imported.** A source with 900 untouched leads
+   is not converting badly; it is unworked. Dividing by imported would have made every fresh import
+   look like a failure.
+
+**Verified against the fixture — every total reconciles**
+- 120 leads = 49 available + 54 assigned + 17 closed; 55 worked.
+- 55 calls = sum of per-agent calls (8+9+8+16+14) = sum of the outcome mix (22+13+8+5+4+3).
+- Source `imported` sums to 120; source `called` sums to 55.
+- Gates: agent and HR → **403** on both APIs and **307 → /403** on `/management`.
+- **THE AD-02 PROOF.** Stripped `monitoring.view` from Management through the real Admin matrix UI,
+  then re-fetched the dashboard: `canSeeMonitoring` false, no monitoring block on any agent, and
+  **zero occurrences of `activeMs` / `idleMs` / `breakMs` / `productivityPct` anywhere in the
+  payload** — while calls and leads kept working, so the screen degrades rather than breaks.
+  `/management/monitoring` began returning 307. Permissions restored afterwards.
+- Agent's resolved set: 7 keys, zero `monitoring.*`.
+- `tsc` clean, `npm run build` clean, `ƒ Proxy (Middleware)` present, dev log error-free.
+
+**Known limitation, deliberate:** call-based KPIs are verified against fixture rows rather than
+rows produced by the real disposition modal. When Dev A's Day 5 lands, re-run the dashboard against
+genuine calls before Day 10 — the aggregation is the same either way, but the assumption that his
+modal writes `disposition_id` and `duration_sec` the way the fixture does is currently untested.
+
+**Next — Day 7: Reporting Engine frontend.** Agree the aggregation function signatures with Dev A
+EARLY; he builds the backend half the same day. Much of `metrics.ts` is reusable.
+
+**Day 6 addendum — Sourcery review fixes (all 5 accepted)**
+
+1. **TM-05 LEAK in the drill-down — REAL, fixed, and it contradicted a claim I made.** The
+   `select` gated `activeMs`/`idleMs`/`breakMs` on `canSeeMonitoring` but `idleCount` and
+   `breakCount` sat one line ABOVE the gate, so a `dashboard.management` holder without
+   `monitoring.view` still received "went idle 40 times today" — a monitoring measurement, not an
+   attendance fact. My Day 6 AD-02 proof only exercised the *dashboard* route, not the drill-down.
+   **Verified after fixing:** attendance rows drop to `date/startedAt/endedAt/stillIn` and zero
+   monitoring keys survive anywhere in the payload, while calls and leads keep working.
+2. **Outcome buckets did not reconcile — REAL, fixed.** `totalCalls` counted every call while
+   `byCode` INNER JOINed `dispositions`, so an undispositioned call inflated the total without
+   appearing in any bucket. Now a LEFT JOIN with an explicit `undispositioned` count, surfaced in
+   the UI whenever non-zero. **Verified** by injecting an abandoned call: 56 + 1 = 57. My fixture
+   always set a disposition, which is exactly why I never saw it — but Dev A's Day 5 modal may
+   well create the call row before the outcome.
+3. **Scope applied to calls but not to leads or sources — REAL, fixed.** "Today" showed today's
+   calls beside all-time lead totals, so "Total leads 120" read as "120 arrived today". Split
+   `getLeadTotals` into `pipeline` (current state — date-filtering "available leads" is
+   meaningless) and `inRange` (imported/worked/qualified), with the UI labelling each group and
+   naming the scope. Source `imported` stays the source's whole book; worked/qualified now respect
+   the range, and the column note says so. **Verified:** pipeline constant across scopes,
+   `imported` moves 24 (today) → 120 (all).
+4. **Fixture was non-deterministic — REAL, fixed.** Documented totals were dice rolls. Now a
+   seeded mulberry32 with every `Math.random()` routed through it, plus an assertion that fails
+   loudly on drift. Dev A learned this on Day 4: *a flaky correctness test is worse than none*.
+5. **Fixture was not idempotent — REAL, fixed.** Every run added another 120 leads. **Found the
+   evidence live: the database already held 240 leads and 103 calls** from two runs, which means
+   the Day 6 figures I reported were computed over doubled data. Leads are now tagged
+   `[fixture]`, a re-run deletes the previous set first, and the calls loop is scoped to fixture
+   leads so it can never dial real imported data. **Verified:** two consecutive runs both end at
+   120 leads / 56 calls / 12 callbacks, not 240.
+
+**Corrected fixture totals: 120 leads, 78 assigned, 56 calls, 12 callbacks** (the earlier
+"55 calls, 13 callbacks" came from unseeded runs over accumulated data). These are now constants
+asserted by the script itself.
+
+**Also worth recording:** the dashboard client hand-declares its own `Payload` interface, so
+changing the server response shape did NOT fail typecheck — the UI would have broken silently at
+runtime. Reusing the exported server types (or generating them) would close that gap; logged for
+the Day 9 NFR pass rather than reshaping four screens today.
