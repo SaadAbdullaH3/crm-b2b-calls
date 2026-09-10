@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -271,11 +272,20 @@ export function ManagementLeadsClient() {
                     />
                   </TableCell>
                   <TableCell>
-                    <div className="font-medium">{lead.companyName ?? "—"}</div>
+                    <Link
+                      href={`/management/leads/${lead.id}`}
+                      className="font-medium underline-offset-4 hover:underline"
+                    >
+                      {lead.companyName ?? lead.contactName ?? lead.id}
+                    </Link>
                     <div className="text-xs text-muted-foreground">
                       {lead.contactName ?? "—"}
-                      {lead.doNotCall ? " · DO NOT CALL" : ""}
                     </div>
+                    {lead.doNotCall ? (
+                      <Badge variant="destructive" className="mt-1">
+                        Do Not Call
+                      </Badge>
+                    ) : null}
                   </TableCell>
                   <TableCell className="text-sm tabular-nums">
                     {lead.phoneE164 ?? lead.phoneRaw ?? "—"}

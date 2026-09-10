@@ -327,3 +327,40 @@ Writing one without the other is the most likely way this module goes wrong, whi
 Lint is **30**, up from Dev B's 26 baseline; the 4 added are all the pre-existing `set-state-in-effect` house pattern. **No new rule classes** — the 2 `purity` ones I introduced were fixed, not absorbed.
 
 **Next — Day 6:** Agent Dashboard (TM-05: no Active/Idle/Break/Productivity anywhere), Do-Not-Call protection surfacing, Lead Timeline (SF-03) and Assignment History (SF-04). Real `calls` and `callbacks` rows now exist to build those views on, and `lead_assignments` already carries the full ownership chain.
+
+### 2026-09-10 — Day 6: Agent Dashboard, Do-Not-Call protection, Lead Timeline, Assignment History
+
+Branch `deva/day-6-agent-dashboard-timeline`. **Held unmerged at Saad's request pending review of the draft PR.** No new migration; no Dev B table touched. NF-07 index re-verified.
+
+**TM-05 — the boundary, and how it is actually held**
+
+`src/server/dashboard/agent-metrics.ts` is a SEPARATE module from Dev B's `metrics.ts`, not a filtered call into it. A shared function that returns monitoring fields and trusts each caller to strip them is one forgotten spread away from leaking, and the leak would be invisible in review. **Not importing the monitoring engine at all is a boundary you can verify by reading the import list.**
+
+Verified two ways, both with a positive control so a passing test means something:
+- **API scan** — the agent dashboard payload contains 0 fields matching `/active|idle|break|productiv/i`; Management's contains 20. Same scanner, so it demonstrably detects them.
+- **Rendered-DOM sweep** across `/agent`, `/agent/call-list`, `/agent/callbacks`, `/agent/request-leads` — all clean, scripts and styles stripped so it tests visible copy rather than bundled identifiers.
+
+**Built**
+- **Agent Dashboard** (`/agent`, replacing the Day 1 placeholder): today's calls and leads worked, the six-outcome mix, leads held / to call / in progress / qualified / not interested / DNC, callbacks overdue-due-upcoming-completed, unread notifications. `leadsWorked` uses Dev B's agreed definition — a lead carrying `last_disposition_at`, not the existence of a call row.
+- **Do-Not-Call protection** — `PATCH /api/leads/[id]/do-not-call`, gated on `leads.dnc.override` (Management/Admin). Asymmetric by design: an agent can *set* DNC through the disposition modal, but only Management can *clear* it. Anything less makes Do Not Call a suggestion. Restoring returns the lead unassigned to the AVAILABLE pool rather than to whoever last held it — it has usually been suppressed a while, and silently reappearing in someone's call list is worse.
+- **SF-03 Lead Timeline** — `src/server/leads/timeline.ts` merges imports, assignments, releases, calls, dispositions, notes, callbacks and modifications into one ordered list. Six small indexed lookups merged in memory rather than one heroic UNION.
+- **SF-04 Assignment History** — reads the append-only `lead_assignments` chain straight through, so it IS the history rather than a reconstruction.
+
+**Two access decisions worth recording**
+1. **Agents can see the timeline of their own leads.** "What did the last person say?" is the most useful thing to know before dialling, and it leaks nothing — they already hold the lead. Implemented as a route-level ownership check (`leads.timeline` OR assigned agent) rather than a new permission key, so **the AD-02 matrix is untouched** and Management can still revoke `leads.timeline` without affecting agents' access to their own work.
+2. **Assignment history stays Management/Admin only.** Who *else* has held a lead is a supervision question, not something an agent needs. Verified: agent → 403.
+
+**Verified**
+- DNC round trip end to end: suppress → cannot dial (409), absent from call list, skipped by assignment → Management restores → back in the call list and dialable (201) → re-suppress → 409 again.
+- Timeline access: agent on their own lead 200; agent2 on agent1's lead 404; HR 404; unauthenticated 401. (404 not 403 — a lead an agent may not see should not be confirmed to exist.)
+- SF-04: management/admin 200, agent 403. 8 holder events and 3 distinct holders on a churned test lead.
+- Role split in the browser: agent sees timeline only, no assignment history, no DNC controls; Management sees all three.
+- Build, typecheck, NF-07 concurrency test all clean.
+
+**One fix during the session:** timeline events sorted on timestamp alone, so a transfer — which writes the release and the new assignment in the same transaction, on the same millisecond — could render "assigned to B" before "released from A". Added a deterministic rank as the tie-break. Only visible on same-instant pairs, which is exactly where a history view must not lie.
+
+**Known limitation, resolved by Day 8:** the timeline shows the *current* Do-Not-Call marking (derived from `leads.do_not_call_at`), not the full history of DNC changes — a suppress → restore → re-suppress sequence shows only the latest. The `MODIFIED` strand already reads `audit_log`, which is empty until Day 8 wires audit capture; once it does, that history appears with **no further work in this file**. Deliberately not instrumented ad hoc now — one action audited in isolation is worse than none.
+
+Lint is **32** (was 30). The 2 added are the same `set-state-in-effect` house pattern; I removed 4 `no-unused-vars` of my own by projecting the timeline's lead object explicitly instead of destructuring-to-discard. The remaining 2 unused-vars and 1 refs are Dev B's.
+
+**Next — Day 7:** Reporting Engine backend — aggregation queries for Daily/Weekly/Monthly/Punctuality plus Lead Source, exposed as filterable endpoints for Dev B's frontend. **Reuse `src/server/dashboard/metrics.ts` rather than writing a second set of aggregations** — Dev B flagged that explicitly, and two definitions of "worked" would put the dashboard and the reports permanently at odds.
