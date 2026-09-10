@@ -628,6 +628,9 @@ model Callback {
   status       CallbackStatus @default(SCHEDULED)
   notes        String?
   completedAt  DateTime?      @map("completed_at")
+  /// When the CL-07 reminder was sent. Guards the cron sweep against
+  /// re-notifying the same callback every minute until it is actioned.
+  remindedAt   DateTime?      @map("reminded_at")
   createdAt    DateTime       @default(now()) @map("created_at")
   updatedAt    DateTime       @updatedAt @map("updated_at")
 

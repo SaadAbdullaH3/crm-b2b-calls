@@ -2,6 +2,7 @@ import cron, { type ScheduledTask } from "node-cron";
 import { runAutoAssignSweep } from "@/server/leads/requests";
 import { runExpiredSessionSweep } from "@/server/leads/sessions";
 import { runIdleSweep } from "@/server/monitoring/engine";
+import { runCallbackSweep } from "@/server/calls/callbacks";
 
 /**
  * Server-side scheduled jobs, running inside the custom server process.
@@ -77,6 +78,27 @@ async function idleSweep() {
   }
 }
 
+/**
+ * CL-07 — remind agents about callbacks that have come due, and mark ones left
+ * an hour past their time as missed.
+ *
+ * Server-side for the same reason the auto-assign sweep is: a callback promised
+ * for 3pm must fire whether or not the agent has the tab open. Reminders are
+ * guarded by `callbacks.reminded_at` so a due callback notifies once, not every
+ * minute until it is actioned.
+ *
+ * Deliberately never reassigns or releases the lead — a missed callback is the
+ * agent's to fix, not a reason to move a lead out from under them.
+ */
+async function callbackSweep() {
+  const result = await runCallbackSweep();
+  if (result.due > 0 || result.missed > 0) {
+    console.log(
+      `[cron] callbacks: ${result.due} reminder(s) sent, ${result.missed} marked missed`,
+    );
+  }
+}
+
 export function startCronJobs() {
   if (process.env.ENABLE_CRON === "false") {
     console.log("[cron] disabled on this process (ENABLE_CRON=false)");
@@ -107,8 +129,16 @@ export function startCronJobs() {
     }),
   );
 
+  tasks.push(
+    cron.schedule("* * * * *", () => {
+      void callbackSweep().catch((err) =>
+        console.error("[cron] callback sweep failed:", err),
+      );
+    }),
+  );
+
   console.log(
-    "[cron] registered 3 jobs: lead auto-assign sweep, idle sweep, expired-session lead return",
+    "[cron] registered 4 jobs: lead auto-assign sweep, idle sweep, expired-session lead return, callback reminders",
   );
 }
 

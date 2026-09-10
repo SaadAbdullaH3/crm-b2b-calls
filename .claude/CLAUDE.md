@@ -277,3 +277,53 @@ Verified both ways against a 7 untouched + 3 No Answer + 3 Call Back Later mix: 
 - Local state left running: dev server on :3000 and the Postgres container (`restart: unless-stopped`). 50 leads with a realistic ownership/disposition spread, 136 assignment-history rows, `assignment.config` using the catalogue default. `docker compose down` to stop the database.
 - Carried into Day 5, all recorded in GLOBAL.md: (1) the `returnNoAnswerOnLogout` question for the call-centre owner; (2) the shared-lint cleanup, now 17 problems across both tracks, queued for Day 9's NFR pass; (3) the SRS requirements-traceability doc still does not exist, and Day 10 is a regression against exactly that list.
 - **Day 5 is the day `last_disposition_code` starts being written.** Every retained-follow-up behaviour built on Day 4 is currently exercised only by hand-set values — it becomes real when the disposition modal ships. Check the VC Dialer status line in GLOBAL.md before starting; it is still marked unconfirmed, which means the clipboard fallback is the real path, not a stub.
+
+### 2026-09-10 — Day 5: Agent Calling Workspace (CL-01…CL-08)
+
+Branch `deva/day-5-calling-workspace`. Pulled Dev B's Days 4–6 first (36 tables); my `day5_callback_reminded_at` makes it 36 still (column only). NF-07 index re-verified after all four migrations.
+
+**VC DIALER STATUS: STILL UNCONFIRMED.** `dialer.config.enabled` is `false`, so the clipboard path is the live implementation, not a stub — exactly what CL-03 demands.
+
+**The one write path for call outcomes: `src/server/calls/disposition.ts`**
+
+Same principle as `assignment.ts`. Every saved outcome writes BOTH halves in one transaction:
+1. the `calls` row — `disposition_id` + `duration_sec`, which is what Dev B's dashboard aggregates;
+2. `leads.last_disposition_code` + `last_disposition_at` — the agreed *worked* signal, which the dashboard, Day 7 reports and Day 4's logout rule all read.
+
+Writing one without the other is the most likely way this module goes wrong, which is why they cannot be written separately.
+
+**Outcome behaviour, all verified against the SRS table**
+| Outcome | Lead status | Extra |
+|---|---|---|
+| No Answer | IN_PROGRESS | stays callable |
+| Call Back Later | CALLBACK_SCHEDULED | date+time **required server-side**, creates a `callbacks` row |
+| Not Interested | CLOSED_NOT_INTERESTED | closed, not re-pooled |
+| Do Not Call | DO_NOT_CALL | sets sticky `do_not_call`; notifies approvers |
+| Email | IN_PROGRESS | follow-up, stays with agent |
+| Successful — Qualify | CLOSED_QUALIFIED | |
+
+**CL-03, the part that matters:** `resolveDialerHandoff` returns CLIPBOARD for *every* case that is not a fully configured dialer — including when an Admin sets `clipboardFallback: false`. There is deliberately no configuration that leaves an agent unable to place a call. Verified: dialer off → clipboard; dialer on with a baseUrl → dial URL; **dialer on with no baseUrl and fallback off → still clipboard**.
+
+**Cron count is now 4** — added the callback reminder sweep. Reminds once when a callback comes due (guarded by the new `callbacks.reminded_at`), and marks anything an hour past its time MISSED. Never reassigns or releases the lead: a missed callback is the agent's to fix, not a reason to move a lead out from under them.
+
+**`calls.channel` now has a third value, `MANUAL`** — an outcome recorded without pressing Call first. Those rows deliberately carry `duration_sec = null` rather than an invented duration.
+
+**Dev B's open assumption is now closed.** Their Day 6 note said "your Day 5 is my last unverified assumption". Their dashboard, run against real rows for the first time, reconciles exactly: `worked=6`, `qualified=1`, `doNotCall=1`, `agent.calls=6`, `totalTalkSec=15`. **One nuance to tell them:** `avgTalkSec` divides total talk time by *all* calls, including MANUAL ones with null duration, so the average is diluted. With mostly-dialled calls it barely shows; it is their aggregation to decide on.
+
+**Verified**
+- All 6 outcomes, each checked in psql for status, `last_disposition_*`, attempts, DNC flag and callback row.
+- CL-06 enforced three ways: missing time → 400, past time → 400, and the modal's Save stays locked.
+- CL-05 blocks in all three places: cannot dial (409), excluded from the call list, refused on reassignment.
+- Cross-agent isolation: agent2 gets 409 on agent1's lead for both call and disposition. HR gets 403 on `calls.log` and `callbacks.manage`. Unauthenticated 401. Management 307 → /403 on agent screens.
+- Double-save on one call → 409.
+- Callback sweep observed firing from cron: 1 reminded, 1 marked missed, both notified; `reminded_at` stops it repeating.
+- Driven in a real browser: Call → clipboard **blocked by the browser**, fallback field shown and toast warned (the real-world failure path, tested for free); modal validation; Call Back Later saved with notes; callback marked Done moved buckets and cleared the lead's pointer.
+- NF-07 concurrency test still passes. Build + typecheck clean.
+
+**Two defects I introduced and fixed in the same session**
+1. **`callbackInPast` was computed during render.** An agent sitting on the modal past the time they picked kept an enabled Save button on stale data, with only the server's 400 catching it. Now ticked from state every 15s. Flagged by `react-hooks/purity`, a rule class nobody had tripped before — worth heeding rather than adding to the lint pile.
+2. Same root cause on the call list's overdue flag, plus a dead `startedAt` field. Both gone.
+
+Lint is **30**, up from Dev B's 26 baseline; the 4 added are all the pre-existing `set-state-in-effect` house pattern. **No new rule classes** — the 2 `purity` ones I introduced were fixed, not absorbed.
+
+**Next — Day 6:** Agent Dashboard (TM-05: no Active/Idle/Break/Productivity anywhere), Do-Not-Call protection surfacing, Lead Timeline (SF-03) and Assignment History (SF-04). Real `calls` and `callbacks` rows now exist to build those views on, and `lead_assignments` already carries the full ownership chain.
