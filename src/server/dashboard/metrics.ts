@@ -13,6 +13,7 @@
 
 import { DispositionCode, LeadStatus, WorkSessionState } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { avgTalkSec } from "@/server/reports/definitions";
 
 export interface DateRange {
   from: Date;
@@ -239,7 +240,12 @@ export async function getAgentPerformance(
       prisma.call.groupBy({
         by: ["agentId"],
         where: { agentId: { in: agentIds }, createdAt: { gte: range.from, lte: range.to } },
-        _count: { _all: true },
+        // `durationSec` is counted as well as `_all` because counting a FIELD
+        // counts its non-null values: that is the denominator for average talk
+        // time. MANUAL-channel rows (an outcome recorded without dialling)
+        // carry a null duration by design, and including them would understate
+        // the average. Dev A raised this on Day 5; see `avgTalkSec` below.
+        _count: { _all: true, durationSec: true },
         _sum: { durationSec: true },
       }),
 
@@ -339,7 +345,10 @@ export async function getAgentPerformance(
       leadsHeld: heldByAgent.get(a.id) ?? 0,
       calls: n,
       totalTalkSec: talk,
-      avgTalkSec: n > 0 ? Math.round(talk / n) : 0,
+      // Shared with the Day 7 reports, imported rather than re-implemented, so
+      // the dashboard and a report over the same window cannot print different
+      // averages for the same agent.
+      avgTalkSec: avgTalkSec(talk, calls?._count.durationSec ?? 0),
       noAnswer: disp.get(DispositionCode.NO_ANSWER) ?? 0,
       callBackLater: disp.get(DispositionCode.CALL_BACK_LATER) ?? 0,
       notInterested: disp.get(DispositionCode.NOT_INTERESTED) ?? 0,

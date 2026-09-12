@@ -211,6 +211,28 @@ enum LeadFieldType {
   URL
 }
 
+// --- Dev B, Day 7: Reporting Engine ----------------------------------------
+
+/// RP-03. A score is a draft until Management approves it; approval freezes it.
+enum ScoreStatus {
+  DRAFT
+  APPROVED
+}
+
+/// RP-03 change history. Append-only, one row per change, never updated.
+enum ScoreEventType {
+  CREATED
+  UPDATED
+  APPROVED
+  REOPENED
+}
+
+/// RP-01 export formats. The stored file's type, for RP-04's history.
+enum ReportFormat {
+  XLSX
+  PDF
+}
+
 // ===========================================================================
 // AUTH & RBAC
 // ===========================================================================
@@ -294,6 +316,9 @@ model User {
   reportsGenerated      ReportGenerated[]
   scoresReceived        ManagementScore[]            @relation("ScoreSubject")
   scoresGiven           ManagementScore[]            @relation("ScoreAuthor")
+  scoresApproved        ManagementScore[]            @relation("ScoreApprover")
+  scoreEvents           ManagementScoreEvent[]       @relation("ScoreEventActor")
+  reportsApproved       ReportGenerated[]            @relation("ReportApprover")
 
   // --- Dev B, Day 5: HR Module -------------------------------------------
   hrDocumentsUploaded HrDocument[]      @relation("HrDocumentUploader")
@@ -1169,36 +1194,93 @@ model LeaveRequest {
   @@map("leave_requests")
 }
 
+/// RP-04 — one row per report a human actually generated, so it stays
+/// reachable afterwards with its period, its filters and who signed it off.
+/// The file itself is kept on disk and served only through a permission-checked
+/// route, the same rule as HR documents.
 model ReportGenerated {
-  id            String   @id @default(cuid())
-  generatedById String   @map("generated_by_id")
-  reportType    String   @map("report_type")
-  periodStart   DateTime @map("period_start")
-  periodEnd     DateTime @map("period_end")
+  id            String       @id @default(cuid())
+  generatedById String       @map("generated_by_id")
+  reportType    String       @map("report_type")
+  periodStart   DateTime     @map("period_start")
+  periodEnd     DateTime     @map("period_end")
   filters       Json?
-  storedPath    String?  @map("stored_path")
-  createdAt     DateTime @default(now()) @map("created_at")
+  storedPath    String?      @map("stored_path")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  /// The scope the user picked (`week`, `last-month`, `custom`...).
+  scope         String?
+  /// Dev A's server-rendered range label, frozen at generation time: the
+  /// report header the client saw is the one the history must show.
+  rangeLabel    String?      @map("range_label")
+  format        ReportFormat @default(XLSX)
+  rowCount      Int?         @map("row_count")
+  fileSize      Int?         @map("file_size")
+  approvedById  String?      @map("approved_by_id")
+  approvedAt    DateTime?    @map("approved_at")
 
-  generatedBy User @relation(fields: [generatedById], references: [id])
+  generatedBy User  @relation(fields: [generatedById], references: [id])
+  approvedBy  User? @relation("ReportApprover", fields: [approvedById], references: [id])
 
   @@index([reportType, createdAt])
+  @@index([approvedById])
   @@map("reports_generated")
 }
 
+/// RP-03 — the Management Score. Editable, but never silently: every change
+/// carries a reason and lands in `management_score_events`, which is
+/// append-only. "Editable with an audit trail" is the requirement; an
+/// overwrite with no history fails it.
 model ManagementScore {
-  id          String   @id @default(cuid())
-  subjectId   String   @map("subject_id")
-  authorId    String   @map("author_id")
-  periodStart DateTime @map("period_start")
-  periodEnd   DateTime @map("period_end")
-  score       Int
-  notes       String?
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id           String      @id @default(cuid())
+  subjectId    String      @map("subject_id")
+  authorId     String      @map("author_id")
+  periodStart  DateTime    @map("period_start")
+  periodEnd    DateTime    @map("period_end")
+  score        Int
+  notes        String?
+  status       ScoreStatus @default(DRAFT)
+  approvedById String?     @map("approved_by_id")
+  approvedAt   DateTime?   @map("approved_at")
+  /// Bumped on every accepted change. The history row records from/to.
+  version      Int         @default(1)
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
 
-  subject User @relation("ScoreSubject", fields: [subjectId], references: [id])
-  author  User @relation("ScoreAuthor", fields: [authorId], references: [id])
+  subject    User  @relation("ScoreSubject", fields: [subjectId], references: [id])
+  author     User  @relation("ScoreAuthor", fields: [authorId], references: [id])
+  approvedBy User? @relation("ScoreApprover", fields: [approvedById], references: [id])
 
+  events ManagementScoreEvent[]
+
+  /// One score per person per period. Two managers scoring the same month
+  /// would give the client two answers to one question; the second attempt
+  /// must edit the first, with the reason that implies.
+  @@unique([subjectId, periodStart, periodEnd])
   @@index([subjectId, periodStart])
+  @@index([status])
   @@map("management_scores")
+}
+
+/// The audit trail behind RP-03. Append-only: no route updates or deletes a
+/// row here, the same rule as `hr_employee_events` and Dev A's
+/// `lead_assignments`. A correction is another row, never an edit.
+model ManagementScoreEvent {
+  id        String         @id @default(cuid())
+  scoreId   String         @map("score_id")
+  actorId   String         @map("actor_id")
+  type      ScoreEventType
+  fromScore Int?           @map("from_score")
+  toScore   Int?           @map("to_score")
+  /// Mandatory on every change, including the first. A score with no stated
+  /// reason is an opinion the subject cannot answer.
+  reason    String
+  /// Before/after for anything other than the number itself (notes, period).
+  changes   Json?
+  createdAt DateTime       @default(now()) @map("created_at")
+
+  score ManagementScore @relation(fields: [scoreId], references: [id], onDelete: Cascade)
+  actor User            @relation("ScoreEventActor", fields: [actorId], references: [id])
+
+  @@index([scoreId, createdAt])
+  @@map("management_score_events")
 }
