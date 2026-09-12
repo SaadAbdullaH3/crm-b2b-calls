@@ -376,3 +376,46 @@ Lint is **32** (was 30). The 2 added are the same `set-state-in-effect` house pa
   2. `assignment.config.returnNoAnswerOnLogout` — the call-centre owner's decision, still unanswered.
   3. Whether agents may see their own break time (Dev B's TM-05 question) — same conversation, worth asking together.
 - Lint is 32 and has grown every day (13 → 16 → 17 → 26 → 30 → 32). Day 9's NFR pass owns it, but the Day 5 lesson stands: a pile that size is where a genuinely new rule class hides.
+
+### 2026-09-12 — Day 7: Reporting Engine backend (aggregation + filterable endpoints)
+
+Branch `deva/day-7-reporting-backend`. No migration. Dev B had not started Day 7 when I began, so I went first — see the sequencing note below.
+
+**Contract first, then code.** `docs/day7-reporting-api-contract.md` was written and sent to Dev B before any SQL. Dev B's frontend cannot render until it knows the shape; my aggregations do not care how they are displayed. Backend-first is the ordering that blocks nobody.
+
+**The simplification worth carrying forward: Daily / Weekly / Monthly are NOT three reports.** They are one aggregation over three date scopes. So there is one `/api/reports/performance` endpoint with a `scope` param, and Dev B builds one screen with a selector rather than three screens.
+
+**Endpoints** (all `reports.view`, except `raw` which is `reports.export`)
+- `GET /api/reports/performance` — totals, outcome mix, byAgent, byDay
+- `GET /api/reports/sources` — imported / assigned / worked / contacted / qualified
+- `GET /api/reports/punctuality` — MG-07 first login vs shift start
+- `GET /api/reports/raw` — flat row-level data for export
+- `GET /api/reports/meta` — scopes, agents, sources, dispositions for the filter dropdowns
+
+Shared scopes: `today yesterday week last-week month last-month 15d custom`. Shared filters: `agentId source disposition`. Shared envelope carries a server-rendered `range.label` so the report header and the query cannot disagree about what "this week" means.
+
+**Why a separate range resolver.** `metrics.resolveRange` gives ROLLING windows (`30d` = last 30 days). Reports need CALENDAR periods — "This month" must mean the 1st to today. A monthly report that silently means "last 30 days" is the kind of thing a client notices at a board meeting. Same `DateRange` shape, so every aggregation in `metrics.ts` still works against either.
+
+**`src/server/reports/definitions.ts` holds the definitions as executable predicates**, not prose: `workedLeadWhere`, `callWhere`, `avgTalkSec`, `conversionPct`, `REPORTABLE_AGENT_WHERE`. A definition that lives only in a comment drifts the first time someone writes a slightly different WHERE clause. **Dev B should import these into `metrics.ts` on Day 8/9** — not done today to avoid a conflict while they work in that file.
+
+**THREE BUGS FOUND, all real**
+
+1. **Qualified ignored the disposition filter.** `{...leadWhere, lastDispositionCode: QUALIFIED}` — the spread silently overrode an active filter, so filtering to NO_ANSWER still reported the qualified count and conversion came out at **100%**. Now zero by definition unless the filter *is* QUALIFIED. Same trap fixed in `byAgent`.
+
+2. **Admin appeared in the punctuality report** — the Day 4 bug recurring. Admin holds every permission including `leads.read.own`, so a naive check puts the person who configures the system into the agent leaderboard. Extracted `REPORTABLE_AGENT_WHERE` (`leads.read.own` AND NOT `leads.approve`) and applied it in all four places. **This is the second time this exact bug has appeared; the shared predicate is what stops a third.**
+
+3. **A real bug in Dev B's HR attendance route, surfaced by the punctuality refactor.** They order work sessions `startedAt: desc`, so the first row seen for a day is the LATEST login and `lateMinutes` was computed from it; finding an earlier session updated `firstLoginAt` but **never recomputed lateness**. The row therefore showed a true first-login time next to a lateness figure derived from a later login — overstating lateness for anyone who signs in more than once a day, which is routine. Agent One on 10 Sep read 593 minutes late; the truth is 561. Fixed by recomputing. **This is the kind of number that ends up in a performance conversation, so it was worth fixing in their file rather than leaving it to match.**
+
+**Also done:** extracted the lateness maths to `lateMinutesFor()` in `src/server/reports/punctuality.ts` and switched Dev B's HR route to call it. Two copies of "how late is late" drift; verified afterwards that HR attendance and the Punctuality report return identical lateness on every shared row.
+
+**Verified**
+- Every scope resolves correctly and reconciles: week (4 calls) + last-week (6) = month (10) = 15d (10).
+- Outcome buckets sum exactly to `callsMade`, including 3 undispositioned — no rows silently lost.
+- Validation: custom without from/to, from-after-to, unknown scope, unknown disposition — all 400 with usable messages.
+- **Reports agree with Dev B's dashboard on every shared metric** over a matched window: worked 7/7, qualified 1/1, calls 10/10, talk time 51/51.
+- RBAC on all five endpoints: management 200, agent 403, HR 403, unauthenticated 401.
+- Build, typecheck, NF-07 concurrency test clean. Lint unchanged at 32 (backend-only day).
+
+**A harness lesson, again.** My first dashboard comparison showed a total mismatch (0 vs 7/1/10/51) and I nearly reported it as a definition divergence. The cause was my own test: their route reads `scope`, I passed `range`, so it silently defaulted to `today`. **Third time this pattern has bitten — Day 4's concurrency script, Day 6's, now this. Check the harness before believing a discrepancy.**
+
+**Next — Day 8:** Audit & History. Wire `audit_log` capture into every lead/call/assignment/disposition action with before/after diffing. Two things already wait on it: the SF-03 timeline's `MODIFIED` strand reads `audit_log` and lights up with no further work, and Dev B builds the audit search UI the same day — so agree the row shape before writing the capture.
