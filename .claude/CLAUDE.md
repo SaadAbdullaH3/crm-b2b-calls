@@ -419,3 +419,48 @@ Shared scopes: `today yesterday week last-week month last-month 15d custom`. Sha
 **A harness lesson, again.** My first dashboard comparison showed a total mismatch (0 vs 7/1/10/51) and I nearly reported it as a definition divergence. The cause was my own test: their route reads `scope`, I passed `range`, so it silently defaulted to `today`. **Third time this pattern has bitten — Day 4's concurrency script, Day 6's, now this. Check the harness before believing a discrepancy.**
 
 **Next — Day 8:** Audit & History. Wire `audit_log` capture into every lead/call/assignment/disposition action with before/after diffing. Two things already wait on it: the SF-03 timeline's `MODIFIED` strand reads `audit_log` and lights up with no further work, and Dev B builds the audit search UI the same day — so agree the row shape before writing the capture.
+
+### 2026-09-12 — Day 7 review of Dev B's frontend (no code written)
+
+Pulled PR #6 (`52f55c1`, 25 files, +3,609). Reviewed, verified, agreed the follow-ups. **No Day 8 work started — Saad's call.**
+
+**Verified rather than taken on trust:** migration applied → **37 tables**, `lead_assignments_one_active_holder` still present; the migration touches only `management_scores` / `management_score_events` / `reports_generated`, no Dev A table; all 6 new routes go through `requirePermission`; `tsc --noEmit` clean; lint 35, matching their count; their export paginates through `RAW_MAX_LIMIT` with a cap rather than shipping one page. **Dev B did not edit a single one of my report modules** — their three new files sit alongside mine in `src/server/reports/`.
+
+**The shared-definitions bet paid off twice.** They imported `REPORTABLE_AGENT_WHERE` into `scores.ts` and my `avgTalkSec` into `metrics.ts` instead of re-implementing either. That is the Day 4 / Day 7 "Admin in the agent list" bug prevented at the source, and the Day 5 `avgTalkSec` divergence closed. **Executable predicates beat prose; keep doing this.**
+
+**Three findings from Dev B, all reproduced locally before agreeing** (50-lead set, not their 120-lead fixture — the shapes matched, so these are properties of my queries):
+1. `RawCallRow` has no `email`. Additive, trivial.
+2. `/api/reports/sources` mixes CURRENT STATE (`assigned`, `doNotCall`) into a RANGE-SCOPED table. `scope=today` → imported 0 / worked 0 / **assigned 7** / DNC 1.
+3. "Assigned" means two things one click apart: `sources.assigned` (any owner, closed included) = 7; `pipeline.assigned` (still being worked) = 4. Theirs: 56 vs 40.
+
+**Severity, recorded so a future session does not over-react:** no data is wrong, nothing corrupted, no migration, no rework of Days 1–6. Every number is a correct answer to *some* question — the column name just does not say which. It is a naming problem today and becomes a correctness problem the first time a new consumer trusts the name.
+
+**Agreed plan — top of Day 8, before the audit work, ~1 hour.** Not Day 10: Day 10 is a regression pass with both tracks frozen, the worst moment to find this. The three are one change — add `email`; extract a shared `assignedLeadWhere` into `definitions.ts`; rename the mixed-scope keys in the PAYLOAD, not just on Dev B's screen. Dev B's labels already protect the reader; the live trap is the key still called `assigned`. **The rename will break Dev B's build rather than their screen** — that is what their `envelope.ts` was built for — so flag it in GLOBAL.md before pushing. Also open: whether `workedPct`'s denominator should be the source's whole book rather than same-period imports.
+
+**Gotcha for both tracks:** `npm ci` fails while the dev server is running — it deletes `node_modules` under the live process. Kill :3000 first, or use `npm install`. Cost a cycle on this pull, when `pdfkit` needed installing.
+
+**Still carried, now through Day 7 with three days left:** (1) the SRS requirements-traceability doc still does not exist and Day 10 regresses against exactly that list — this is the biggest unaddressed risk in the project; (2) `assignment.config.returnNoAnswerOnLogout`, the call-centre owner's decision; (3) whether agents may see their own break time. Items 2 and 3 are one conversation with the client.
+
+### 2026-09-12 — SRS requirements-traceability matrix (`docs/srs-traceability.md`)
+
+The item carried since Day 1 is done. Written **before** Day 8 at Saad's call, and the right call: it found three gaps that Day 10 would otherwise have found under time pressure with both tracks frozen.
+
+**Source matters.** The real SRS lives at `Downloads/CRM_B2B_Calls_Final_Requirements.docx` — *outside the repo*, never committed. I extracted `word/document.xml` from the .docx (it is a zip) and counted from that rather than trusting `docs/crm-b2b-build-plan.md`, which is only a summary of it. **If a future session needs requirement text, extract it again from that path; the repo does not contain it.**
+
+**The two disagreed, and the plan was wrong twice:**
+- **§21 has 16 acceptance criteria, not 27.** The build plan has said 27 since Day 1, and every plan derived from it — including Day 10's scope — inherited the error. There is no missing set of 11. **Nothing was skipped**; the number was wrong upstream. Verified by counting the section directly.
+- **92 numbered requirements**, not "~150" (AD 10, AU 4, CL 8, CM 8, HR 8, LA 10, LM 9, MG 10, NF 10, RP 4, SF 4, TM 7), plus ~35 unnumbered obligations in §6.1/§8.1/§15/§17/§19. "~150" was flagged as an estimate, so that one is fair.
+
+**Standing: 11 of 16 acceptance criteria pass outright, 5 partial, 4 of those close on Days 8–9.**
+
+**THREE GAPS THE DAY-BY-DAY TRACKING MISSED — none was in GLOBAL.md before today:**
+
+1. **TM-07 — no monitoring metrics in any report. My error, and worth understanding rather than just fixing.** TM-05 forbids Active/Idle/Break/Productivity on the **Agent dashboard**. TM-07 *requires* them in **Management reports**, and §10's table names them as minimum content for Daily/Weekly/15-Day/Monthly. On Day 7 I wrote "No monitoring fields" into the reporting contract as though TM-05 were a global ban. **A boundary defended too widely fails the requirement on the other side of it** — the Day 6 reasoning about not importing the monitoring engine at all was right for the agent dashboard and wrong as a general rule. Fix is small: `getAgentPerformance()` already accepts `includeMonitoring`; the report endpoints must pass it, gated on `monitoring.view`.
+2. **MG-07 — punctuality ships 3 of its 6 named fields.** Missing early logout, break time, total scheduled time, total recorded working time. Every input already exists; `break_periods` is Dev B's table, so coordinate rather than reading it blind.
+3. **AD-08 — notification configuration has no day assigned anywhere in the build plan.** The only requirement in the SRS with no home. Named inside acceptance criterion 14. Also found: `/api/announcements` has no `notify()` call site at all.
+
+**Also recorded and previously untracked:** LA-06 says "assign to a specific agent **or group**" — group assignment is not implemented, though `groups` exists with 4 rows. SF-01/SF-02/MG-04 want search over *dynamic mapped fields*; `/api/leads?q=` searches a fixed column list (Dev B's Day 8). NF-02 performance has never been measured. NF-08 has no persisted error log — which bites hardest during Day 9's dialer work. NF-10 has role limits but no retention policy.
+
+**The one that cannot be fixed by building harder: acceptance criterion 8 names "computer activity status", which needs the descoped desktop component (TM-02).** Everything else in that criterion is built. **Confirm with the client before Day 10.** It joins the two existing client questions — the No Answer logout rule and agent-visible break time — as one conversation, now written up as §6 of the traceability doc.
+
+**Maintenance rule, written into the doc itself:** update it the day a status changes, not at day end, and move the status and the evidence cell together. **A traceability matrix that lags the code is worse than none, because it gets trusted.** Day 10 works from §2 of that file.
