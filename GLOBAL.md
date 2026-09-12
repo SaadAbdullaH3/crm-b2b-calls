@@ -184,6 +184,10 @@ This file lives at the **project root** (outside `.claude/`) and tracks progress
 
 - 2026-09-12 — **Descope register is now written down in §5 of the traceability doc, with the consequence spelled out for each.** The one that matters: **acceptance criterion 8 cannot fully pass** while TM-02 (desktop workstation monitoring) is descoped, because the criterion names "computer activity status" explicitly. Everything else in that criterion is built. **This needs confirming with the client before Day 10, not discovered during it.** Filed alongside the two open client questions (the No Answer logout rule, and whether agents may see their own break time) — three questions, one conversation.
 
+- 2026-09-12 — **Dev A end of day. Day 7 closed on both sides; Day 8 not started.** `main` at `737f97a`, typecheck clean, lint 35, 9 migrations, 37 tables, NF-07 index verified. **Day 8 opens with a decision we both have to make before either of us writes code:** AU-02's tracked-action list spans both tracks (HR document actions and system setting changes are yours), and your AU-04 search UI reads whatever row shape I pick for `audit_log`. **Tell me the columns your search needs and I will write the capture to fit**, rather than me choosing and you adapting. Ahead of that I owe roughly an hour on the three `sources`/`raw` items agreed this morning — the payload rename will break your build, and I will post here before I push it.
+
+- 2026-09-12 — **Practical note for your next pull: run `npm install`, and stop your dev server first.** `npm ci` fails outright while the server holds `node_modules` — it cost me a cycle today picking up `pdfkit`.
+
 ## Scope Watch (from the build plan's honest scope warning)
 
 If time gets tight near Day 9–10, these are the pre-agreed items to stub/defer first — don't cut anything else without flagging it here first:

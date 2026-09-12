@@ -464,3 +464,23 @@ The item carried since Day 1 is done. Written **before** Day 8 at Saad's call, a
 **The one that cannot be fixed by building harder: acceptance criterion 8 names "computer activity status", which needs the descoped desktop component (TM-02).** Everything else in that criterion is built. **Confirm with the client before Day 10.** It joins the two existing client questions — the No Answer logout rule and agent-visible break time — as one conversation, now written up as §6 of the traceability doc.
 
 **Maintenance rule, written into the doc itself:** update it the day a status changes, not at day end, and move the status and the evidence cell together. **A traceability matrix that lags the code is worse than none, because it gets trusted.** Day 10 works from §2 of that file.
+
+**End-of-day addendum (2026-09-12)**
+
+Two things shipped this session, both merged and pushed; **no Day 8 work started, at Saad's call.**
+1. Review of Dev B's Day 7 frontend (PR #6, `52f55c1`) — pulled, verified, three follow-ups agreed and answered in GLOBAL.md.
+2. `docs/srs-traceability.md` — the Day 1 carry-over, finally built (`737f97a`).
+
+`main` is at `737f97a`, in sync with origin, working tree clean, `git branch -r --no-merged origin/main` empty. Typecheck clean, lint 35, 9 migrations applied, **37 tables**, NF-07 index verified present.
+
+**Local state:** dev server **stopped** (I killed PID 43996 — `npm ci` cannot run while it holds `node_modules`). Postgres container up, `restart: unless-stopped`. 50 leads, 10 calls, 291 assignment-history rows, **0 audit_log rows** and 0 generated reports. `docker compose down` to stop the database. **Run `npm install` before anything else next session if `pdfkit` is missing** — Dev B added it and `npm ci` will fail if the server is running.
+
+**Day 8 starts with a conversation, not with code.** Audit capture spans both tracks: AU-02's list names HR document actions and system setting changes, which are Dev B's to write, and their audit search UI (AU-04) reads whatever row shape I choose. **Agree the shape before writing the capture**, or the two halves land incompatible. The SF-03 timeline's `MODIFIED` strand already reads `audit_log` and lights up with no further work in that file.
+
+**Queued ahead of the audit work, ~1 hour, agreed with Dev B today:** add `email` to `RawCallRow`; extract a shared `assignedLeadWhere` into `definitions.ts`; rename the mixed-scope keys in the payload, not just on Dev B's screen. That rename breaks their build rather than their screen — flag it in GLOBAL.md before pushing.
+
+**Then the traceability findings, in cost order:** TM-07 (monitoring metrics absent from every report — mine to fix with Dev B), MG-07's four missing punctuality fields, LA-06 group assignment. NF-09 timezone and NF-02/NF-08 belong to Day 9. **AD-08 still has no day and no owner.**
+
+**Three client questions, one conversation, now written up as §6 of the traceability doc:** the No Answer logout rule (Q1, open since Day 4), agent-visible break time (Q2, since Day 6), and whether **acceptance criterion 8 is accepted without computer activity monitoring** (Q3, new today). Q3 is the one that must be asked before Day 10 — TM-02 was descoped on Day 1 and that criterion names "computer activity status" explicitly, so it cannot fully pass as scoped no matter how much gets built.
+
+**The Day 1 carry-over list is finally down to items with owners.** For seven days it read "the traceability doc still does not exist"; it now reads "AD-08 has no day". That is a better problem.
