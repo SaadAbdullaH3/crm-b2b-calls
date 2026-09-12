@@ -8,10 +8,14 @@ sessions via a gitignored `CLAUDE.local.md` containing `@DEV-B.md`.
 bottom — never delete prior entries, only add.** Then update the Dev B column of your row in
 `GLOBAL.md` so Dev A sees status without reading this file.
 
-> **Why not `.claude/CLAUDE.md`?** Claude Code auto-loads the **root** `CLAUDE.md` (which here
-> only contains `@AGENTS.md`) plus any file it `@`-imports — not `.claude/CLAUDE.md`. Dev A's
-> context file is therefore likely never being read automatically; it has to be opened by hand.
-> Flagged to Dev A on Day 2. Don't copy that layout.
+> **Why not `.claude/CLAUDE.md`?** Two context files in one repo would both auto-load into both
+> developers' sessions, and a file opening with "My ownership (Dev A)" is the wrong thing to hand a
+> Dev B session. `DEV-B.md` at the root loads only through the gitignored `CLAUDE.local.md`.
+>
+> **Correction (2026-09-12):** the Day 2 version of this note claimed `.claude/CLAUDE.md` is
+> probably never auto-loaded. That was wrong — Claude Code reads it as a project instruction file,
+> so Dev A's log loads automatically in their sessions *and* in mine. Dev A corrected this in
+> GLOBAL.md on Day 2 and I did not update my own notes until now.
 
 ---
 
@@ -102,8 +106,8 @@ full-stack by module so we rarely touch the same files.
 2. `GLOBAL.md` — Dev A's latest status + the Cross-Cutting Decisions Log.
 3. `docs/dev-b-phase-prompts.md` — the prompt block for today's day number.
 4. `docs/crm-b2b-build-plan.md` — if unsure how a feature should behave.
-5. `.claude/CLAUDE.md` — Dev A's session log. **Not auto-loaded; open it by hand** when I need to
-   know what he actually built (e.g. before consuming one of his APIs).
+5. `.claude/CLAUDE.md` — Dev A's session log. It **does** auto-load (corrected 2026-09-12), so it is
+   already in context; read the latest entry before consuming one of their APIs.
 
 ---
 
@@ -625,3 +629,101 @@ asserted by the script itself.
 changing the server response shape did NOT fail typecheck — the UI would have broken silently at
 runtime. Reusing the exported server types (or generating them) would close that gap; logged for
 the Day 9 NFR pass rather than reshaping four screens today.
+
+### 2026-09-12 — Day 7: Reporting Engine frontend (RP-01 … RP-04)
+
+Branch `devb/day-7-reporting-frontend`, cut from main with Dev A's `deva/day-7-reporting-backend`
+merged in locally so I could build against the real endpoints instead of a stub. **37 tables.** Both
+hand-written indexes re-verified after migrating.
+
+**The day's real lesson: Dev A went first, and that was the right order.** They published
+`docs/day7-reporting-api-contract.md` and had all five endpoints pushed before I started. A frontend
+cannot render until it knows the shape; an aggregation does not care how it is displayed. The work
+was genuinely parallel with no negotiation round-trip, because the contract did the negotiating.
+
+**Shipped**
+- `src/server/reports/export.ts` — RP-01. Four reports × two formats is EIGHT exporters written
+  directly, and eight places to rename a column in seven of them. Every report is flattened into one
+  neutral `ExportDocument` (summary blocks and tables) and there are exactly **two renderers**, xlsx
+  and pdf. Adding a report means adding a shaper. **Nothing is recomputed here** — the export
+  receives the same payload the screen received, so it cannot disagree with the screen it came from.
+- `src/server/reports/history.ts` — RP-04. Generating writes three things: the file, a
+  `reports_generated` row with period, filters and the frozen range label, and on request a sign-off
+  stamp. Storage follows the HR-document rules exactly: named from the record id, outside the web
+  root, served only through a permission-checked route as `attachment` + `nosniff` + `no-store`.
+- `src/server/reports/scores.ts` — RP-03. DRAFT → APPROVED → (reopen) → DRAFT, every transition
+  writing an append-only `management_score_events` row with from/to, actor and a mandatory reason.
+- 6 API routes and 3 screens (`/management/reports`, `.../reports/history`, `/management/scores`).
+- `src/lib/reports/envelope.ts` — the shared envelope typed once; the `data` types are IMPORTED from
+  Dev A's modules.
+
+**Decisions**
+1. **One screen with a scope selector, not five screens.** Dev A's simplification, and it is right:
+   Daily / Weekly / Monthly / 15-day / Custom differ only in the window.
+2. **Payload types are imported from the server modules, never re-declared.** This closes the Day 6
+   gap: the dashboard hand-declared its own `Payload`, so a server shape change would have broken
+   the screen silently at runtime. `import type` is erased at compile time, so no server code
+   reaches the browser bundle.
+3. **Export is POST with the filters in the QUERY STRING**, so it reuses Dev A's
+   `parseReportRequest` unchanged. A second parser here would be a second definition of "this week".
+4. **The export returns JSON and the file downloads through the history route.** The bytes a user
+   gets now come off the same path as the bytes they get from the archive in March, so RP-04 is
+   exercised by every export rather than by a separate feature nobody tries.
+5. **An approved score cannot be edited in place** — reopening is deliberate, with its own reason and
+   its own event. Approval means nothing if the number can move afterwards without someone choosing
+   to unfreeze it.
+6. **RP-03 history is its own table, not `audit_log`** — `audit_log` stays empty until Dev A's Day 8,
+   and a trail the screen cannot render today is not a trail.
+7. **Report sign-off reuses `reports.score.manage`** rather than a 38th permission key, because a new
+   key needs a re-seed and re-seeding still wipes AD-02 runtime changes.
+
+**Verified against the running server**
+- Reconciliation on the 120-lead fixture: the outcome mix sums to `callsMade` (27+12+6+2+1+8 = 56);
+  per-agent calls sum to 56; source `imported` sums to 120, `worked` to 56, `qualified` to 8; raw
+  `total` is 56. **Reports and the dashboard agree** on calls, talk time, every outcome bucket,
+  per-agent calls, and per-source worked/qualified.
+- **Exports are real files.** The .xlsx opens with 4 sheets (Report / By agent / Outcome mix / By
+  day) carrying the expected copy; the .pdf is a valid 2-page document. Download headers:
+  `attachment`, `nosniff`, `private, no-store`, RFC 5987 filename.
+- **RP-03 lifecycle end to end:** create → duplicate period 409 → edit → approve → edit-approved 409
+  → double-approve 409 → reopen → edit, with all five events and their reasons in the history.
+  Validation: a 1-character reason 400, a score of 140 400.
+- **Concurrency:** 6 simultaneous approvals of one draft → **one 200, five 409s**, one APPROVED
+  event. Same conditional-claim pattern as Day 5's leave approvals.
+- **RBAC:** management 200 across all nine routes; agent and HR **403 on every one**, 307 on the
+  pages; unauthenticated 401.
+- **The export permission split is real, not decorative.** Stripped `reports.export` from Management
+  through the actual AD-02 matrix: performance / sources / history / scores stayed 200 while the raw
+  data view, generating an export and downloading one all returned 403. Restored afterwards.
+- **TM-05:** zero `activeMs|idleMs|breakMs|productivity|idleCount|breakCount` occurrences across all
+  seven report payloads, with the dashboard's 20 as the positive control.
+- `tsc` clean, `npm run build` clean, `ƒ Proxy (Middleware)` present.
+
+**Three findings, all raised in GLOBAL.md**
+1. **`sources.assigned` and `doNotCall` are current state inside a range-scoped table** — at
+   `scope=today` the row reads "imported 0, worked 0, assigned 56". The same mixed-scope bug Sourcery
+   caught on my Day 6 dashboard, now on Dev A's side. Labelled "Owned now" / "Do Not Call now" on
+   screen and in the export rather than editing their module mid-day.
+2. **"Assigned" means two different things across our two screens** — dashboard 40 (still being
+   worked) versus report 56 (has an owner at all). Proposed one shared predicate in `definitions.ts`.
+3. **`workedPct` reads 0% for any period with no imports**, because both halves are range-scoped.
+
+**Two things I changed in my own code because of Dev A's work**
+- **`avgTalkSec` now divides by calls that HAVE a duration**, importing their helper from
+  `definitions.ts` rather than keeping a second copy. Positive control: one MANUAL null-duration call
+  moved Agent One from 11 to 12 calls on both surfaces while the average held at 236s on both; the
+  old code would have shown 216 on the dashboard against 236 on the report.
+- Accepted their fix to my HR attendance route. Lateness was computed from the LAST login of the day
+  and never recomputed when an earlier session was found — my bug, from Day 5, and exactly the kind
+  of number that ends up in a performance conversation.
+
+**Not done, and worth knowing:** the three screens were exercised through the API and the pages
+return 200, but I did **not** drive them in a real browser this session — signing in means typing the
+seed password into a form, which I do not do. Day 4's lesson stands: a 200 from the API does not
+prove the button is wired. Worth ten minutes of clicking before Day 10, especially the two export
+buttons, the tab switches, and the score edit / approve forms.
+
+**Next — Day 8:** global search and filters (SF-01/02, with a GIN index strategy for
+`leads.custom_fields`), finishing the nine SRS §15 notification types end to end, and the AU-04
+audit-log search UI. Dev A writes the audit rows the same day — agree the action-name vocabulary
+early, the way the reporting contract worked today.

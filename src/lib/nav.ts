@@ -33,6 +33,7 @@ export const NAV: Record<string, NavItem[]> = {
     { href: "/management/leads", label: "All Leads", day: 6 },
     { href: "/management/monitoring", label: "Agent Monitoring", day: 4 },
     { href: "/management/reports", label: "Reports", day: 7 },
+    { href: "/management/scores", label: "Management Scores", day: 7 },
     { href: "/messages", label: "Messages", day: 3 },
     { href: "/announcements", label: "Announcements", day: 3 },
   ],
