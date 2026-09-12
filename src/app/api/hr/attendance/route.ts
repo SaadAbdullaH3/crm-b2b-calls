@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { requirePermission } from "@/lib/auth/rbac";
 import { ok } from "@/lib/api";
 import { getSetting } from "@/lib/settings";
+import { lateMinutesFor } from "@/server/reports/punctuality";
 
 /**
  * HR-04 — attendance and punctuality, read-only.
@@ -45,7 +46,6 @@ export const GET = requirePermission("hr.attendance.read", async (req) => {
   });
 
   const shift = await getSetting("shift.config");
-  const [shiftHour, shiftMinute] = shift.startTime.split(":").map(Number);
 
   // One row per user per day: first login, last activity, and how late the
   // first login was against the configured shift start (MG-07).
@@ -68,12 +68,13 @@ export const GET = requirePermission("hr.attendance.read", async (req) => {
     const existing = byKey.get(key);
 
     if (!existing) {
-      const expected = new Date(s.startedAt);
-      expected.setHours(shiftHour ?? 9, shiftMinute ?? 0, 0, 0);
-      const lateMs = s.startedAt.getTime() - expected.getTime();
-      const lateMinutes = Math.max(
-        0,
-        Math.round(lateMs / 60_000) - shift.graceMinutes,
+      // Shared with the MG-07 Punctuality report (Dev A, Day 7). Two copies of
+      // "how late is late" drift the first time either is tweaked, and this
+      // screen and that report must never disagree.
+      const lateMinutes = lateMinutesFor(
+        s.startedAt,
+        shift.startTime,
+        shift.graceMinutes,
       );
 
       byKey.set(key, {
@@ -95,6 +96,18 @@ export const GET = requirePermission("hr.attendance.read", async (req) => {
     }
     if (s.startedAt < existing.firstLoginAt) {
       existing.firstLoginAt = s.startedAt;
+      // Recompute, don't just move the timestamp. Sessions arrive newest-first,
+      // so the lateness was originally calculated from the LAST login of the
+      // day; finding an earlier one without recalculating left the row showing
+      // a true first-login time next to a lateness derived from a later one.
+      // That overstated lateness for anyone who signed in more than once —
+      // common when an agent uses two machines or signs back in after a break.
+      // Caught on Day 7 when the punctuality report disagreed with this screen.
+      existing.lateMinutes = lateMinutesFor(
+        s.startedAt,
+        shift.startTime,
+        shift.graceMinutes,
+      );
     }
   }
 
